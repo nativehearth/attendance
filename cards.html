@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Student QR cards</title>
+<style>
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:system-ui,-apple-system,Roboto,sans-serif; color:#111827; background:#f3f4f6; }
+  .hidden { display:none !important; }
+  #controls { padding:16px; display:flex; flex-wrap:wrap; gap:10px; align-items:flex-end; background:#fff; border-bottom:1px solid #e5e7eb; }
+  label { display:flex; flex-direction:column; gap:4px; font-size:13px; font-weight:600; }
+  input, select { font-size:16px; padding:8px 10px; border:1px solid #cbd5e1; border-radius:8px; }
+  button { font-size:15px; padding:9px 14px; border-radius:8px; border:1px solid #cbd5e1; background:#fff; cursor:pointer; }
+  button.primary { background:#15803d; color:#fff; border-color:#15803d; }
+  #msg { width:100%; color:#6b7280; font-size:14px; margin:0; }
+
+  /* print sheet: credit-card size cards, 10 per A4 */
+  #sheet { display:grid; grid-template-columns:repeat(2, 85.6mm); gap:2mm; justify-content:center; padding:10mm 0; }
+  .card { width:85.6mm; height:54mm; background:#fff; border:0.3mm dashed #9ca3af; display:flex; align-items:center;
+          gap:3mm; padding:3mm 4mm; page-break-inside:avoid; break-inside:avoid; }
+  .card .qr { width:40mm; height:40mm; flex:0 0 40mm; }
+  .card .qr svg { width:100%; height:100%; display:block; }
+  .card .txt { display:flex; flex-direction:column; gap:1.5mm; min-width:0; }
+  .card .name { font-size:13pt; font-weight:700; line-height:1.15; word-break:break-word; }
+  .card .roll { font-size:11pt; }
+  .card .org { font-size:7.5pt; color:#4b5563; margin-top:2mm; }
+
+  /* screen mode: one big card, for scanning from a laptop screen */
+  #screen { position:fixed; inset:0; background:#fff; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:14px; }
+  #screen .qr { width:min(62vh, 80vw); height:min(62vh, 80vw); }
+  #screen .qr svg { width:100%; height:100%; }
+  #s-name { font-size:32px; font-weight:700; } #s-meta { font-size:20px; color:#4b5563; }
+  #s-nav { display:flex; gap:10px; }
+  #s-nav button { font-size:18px; padding:10px 18px; }
+
+  @media print {
+    @page { size:A4; margin:6mm; }
+    body { background:#fff; }
+    #controls, #screen { display:none !important; }
+    #sheet { padding:0; }
+  }
+</style>
+</head>
+<body>
+<div id="controls">
+  <label>Admin key<input id="in-key" type="password" autocomplete="off" style="width:140px"></label>
+  <button id="btn-load" class="primary">Load students</button>
+  <label>Batch<select id="sel-batch"><option value="">All batches</option></select></label>
+  <button id="btn-print">Print cards</button>
+  <button id="btn-screen">Show one by one on screen</button>
+  <p id="msg">Enter the admin key (Sheet menu Attendance &gt; Show admin key) and load students.</p>
+</div>
+<div id="sheet"></div>
+
+<div id="screen" class="hidden">
+  <div class="qr" id="s-qr"></div>
+  <div id="s-name"></div>
+  <div id="s-meta"></div>
+  <div id="s-nav">
+    <button id="btn-prev">Previous</button>
+    <button id="btn-invalid">Invalid test card</button>
+    <button id="btn-next">Next</button>
+    <button id="btn-close">Close</button>
+  </div>
+</div>
+
+<script src="config.js"></script>
+<script src="qrcode.js"></script>
+<script>
+'use strict';
+qrcode.stringToBytes = qrcode.stringToBytesFuncs['UTF-8'];
+const API_URL = (window.APP_CONFIG || {}).API_URL || '';
+const $ = (id) => document.getElementById(id);
+let cards = [];
+let idx = 0;
+
+function esc(s) { return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
+function qrSvg(text) {
+  const q = qrcode(0, 'M');
+  q.addData(text);
+  q.make();
+  return q.createSvgTag({ cellSize: 4, margin: 8, scalable: true });
+}
+function visible() {
+  const b = $('sel-batch').value;
+  return b ? cards.filter((c) => c.batch === b) : cards;
+}
+function renderSheet() {
+  $('sheet').innerHTML = visible().map((c) =>
+    '<div class="card"><div class="qr">' + qrSvg(c.qr) + '</div><div class="txt">' +
+    '<div class="name">' + esc(c.name) + '</div><div class="roll">Roll ' + esc(c.roll) + '</div>' +
+    '<div class="roll">Batch ' + esc(c.batch) + '</div><div class="org">TNS India Foundation</div></div></div>').join('');
+  $('msg').textContent = visible().length + ' cards shown. Print on A4 at 100% scale (no "fit to page").';
+}
+async function load() {
+  const key = $('in-key').value.trim();
+  if (!key) return;
+  if (!/^https:\/\/script\.google\.com\//.test(API_URL)) { $('msg').textContent = 'Server URL not set in config.js'; return; }
+  $('msg').textContent = 'Loading...';
+  try {
+    const r = await fetch(API_URL, { method: 'POST', redirect: 'follow', headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({ action: 'cards', adminKey: key }) }).then((x) => x.json());
+    if (!r.ok) { $('msg').textContent = r.error || 'Not accepted'; return; }
+    try { sessionStorage.setItem('adminKey', key); } catch (e) { /* ignore */ }
+    cards = r.cards;
+    const sel = $('sel-batch');
+    const cur = sel.value;
+    sel.innerHTML = '<option value="">All batches</option>' + r.batches.map((b) => '<option>' + esc(b) + '</option>').join('');
+    sel.value = r.batches.includes(cur) ? cur : '';
+    renderSheet();
+  } catch (e) {
+    $('msg').textContent = 'Could not reach server: ' + e.message;
+  }
+}
+function showCard(i) {
+  const list = visible();
+  if (!list.length) return;
+  idx = (i + list.length) % list.length;
+  const c = list[idx];
+  $('s-qr').innerHTML = qrSvg(c.qr);
+  $('s-name').textContent = c.name;
+  $('s-meta').textContent = 'Roll ' + c.roll + ' · Batch ' + c.batch + ' · ' + (idx + 1) + ' of ' + list.length;
+}
+function showInvalid() {
+  const c = visible()[idx] || cards[0];
+  if (!c) return;
+  const parts = c.qr.split('|');
+  parts[4] = parts[4] === 'AAAAAA' ? 'BBBBBB' : 'AAAAAA'; // wrong check code, like a home-made card
+  $('s-qr').innerHTML = qrSvg(parts.join('|'));
+  $('s-name').textContent = 'Invalid test card';
+  $('s-meta').textContent = 'Should give red, low buzz, "card not valid"';
+}
+
+$('btn-load').onclick = load;
+$('in-key').addEventListener('keydown', (e) => { if (e.key === 'Enter') load(); });
+$('sel-batch').onchange = renderSheet;
+$('btn-print').onclick = () => { if (!visible().length) return; window.print(); };
+$('btn-screen').onclick = () => { if (!visible().length) return; $('screen').classList.remove('hidden'); showCard(0); };
+$('btn-next').onclick = () => showCard(idx + 1);
+$('btn-prev').onclick = () => showCard(idx - 1);
+$('btn-invalid').onclick = showInvalid;
+$('btn-close').onclick = () => $('screen').classList.add('hidden');
+document.addEventListener('keydown', (e) => {
+  if ($('screen').classList.contains('hidden')) return;
+  if (e.key === 'ArrowRight' || e.key === ' ') { e.preventDefault(); showCard(idx + 1); }
+  if (e.key === 'ArrowLeft') showCard(idx - 1);
+  if (e.key === 'Escape') $('screen').classList.add('hidden');
+});
+try { const k = sessionStorage.getItem('adminKey'); if (k) { $('in-key').value = k; load(); } } catch (e) { /* ignore */ }
+</script>
+</body>
+</html>

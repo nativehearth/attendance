@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#14532d">
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icon-192.png">
+<title>Attendance</title>
+<style>
+  :root { --green:#15803d; --amber:#d97706; --red:#b91c1c; --ink:#111827; --muted:#6b7280; --line:#e5e7eb; }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html,body { margin:0; height:100%; font-family:system-ui,-apple-system,Roboto,sans-serif; color:var(--ink); background:#f8faf8; }
+  .hidden { display:none !important; }
+  .screen { min-height:100%; padding:16px; display:flex; flex-direction:column; gap:12px; }
+  h1 { font-size:22px; margin:8px 0; } h2 { font-size:18px; margin:4px 0; }
+  label { display:flex; flex-direction:column; gap:6px; font-weight:600; }
+  input { font-size:18px; padding:12px; border:1px solid #cbd5e1; border-radius:10px; width:100%; }
+  button { font-size:17px; padding:14px 16px; border-radius:12px; border:1px solid #cbd5e1; background:#fff; color:var(--ink); }
+  button:disabled { opacity:.45; }
+  button.primary { background:var(--green); color:#fff; border-color:var(--green); font-weight:700; }
+  button.secondary { background:#1e3a8a; color:#fff; border-color:#1e3a8a; font-weight:700; }
+  button.link { background:none; border:none; color:#1d4ed8; padding:6px; font-size:15px; }
+  .row { display:flex; gap:10px; } .row > * { flex:1; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(110px,1fr)); gap:10px; }
+  .batch.sel { background:#dcfce7; border:2px solid var(--green); font-weight:700; }
+  .card { background:#fff; border:1px solid var(--line); border-radius:12px; padding:12px; display:flex; flex-direction:column; gap:8px; }
+  .msg { color:var(--muted); margin:0; min-height:1.2em; }
+  .small { font-size:12px; color:var(--muted); }
+  header { display:flex; justify-content:space-between; align-items:center; }
+
+  #scr-scan { padding:0; gap:0; height:100%; }
+  #cam-wrap { position:relative; background:#000; flex:0 0 auto; height:52vh; overflow:hidden; }
+  #video { width:100%; height:100%; object-fit:cover; display:block; }
+  #flash { position:absolute; inset:0; opacity:0; transition:opacity .35s; pointer-events:none; }
+  #flash.on { opacity:.45; transition:none; }
+  #aim { position:absolute; left:50%; top:50%; width:62vw; height:62vw; max-width:60%; max-height:80%; transform:translate(-50%,-50%);
+         border:3px solid rgba(255,255,255,.7); border-radius:14px; pointer-events:none; }
+  #banner { position:absolute; left:0; right:0; bottom:0; padding:10px 12px; background:rgba(0,0,0,.65); color:#fff;
+            font-size:20px; font-weight:700; display:flex; align-items:center; gap:10px; min-height:52px; }
+  #banner.green { background:rgba(21,128,61,.92); } #banner.amber { background:rgba(217,119,6,.95); } #banner.red { background:rgba(185,28,28,.95); }
+  #banner-text { flex:1; }
+  #btn-add-anyway { flex:0 0 auto; padding:8px 12px; font-size:15px; }
+  #scan-info { padding:10px 14px; font-size:16px; display:flex; justify-content:space-between; border-bottom:1px solid var(--line); background:#fff; }
+  #recent { list-style:none; margin:0; padding:0 8px; flex:1; overflow:auto; background:#fff; }
+  #recent li { display:flex; align-items:center; gap:10px; padding:10px 6px; border-bottom:1px solid var(--line); font-size:16px; }
+  #recent li img { width:36px; height:36px; object-fit:cover; border-radius:6px; }
+  #recent li .meta { color:var(--muted); font-size:13px; margin-left:auto; text-align:right; }
+  .badge { font-size:11px; padding:2px 6px; border-radius:6px; background:#e5e7eb; }
+  .badge.manual { background:#dbeafe; } .badge.new { background:#fde68a; } .badge.flag { background:#fecaca; }
+  .bottom { padding:10px; background:#fff; border-top:1px solid var(--line); }
+
+  .dialog { position:fixed; inset:0; background:rgba(0,0,0,.45); display:flex; align-items:flex-end; z-index:10; }
+  .dlg-body { background:#fff; width:100%; max-height:92vh; overflow:auto; border-radius:16px 16px 0 0; padding:14px; display:flex; flex-direction:column; gap:10px; }
+  #search-results { list-style:none; margin:0; padding:0; }
+  #search-results li { padding:14px 8px; border-bottom:1px solid var(--line); font-size:18px; }
+  #search-results li.muted { color:var(--muted); }
+  #video2 { width:100%; max-height:50vh; object-fit:cover; border-radius:10px; background:#000; }
+</style>
+</head>
+<body>
+
+<section id="scr-login" class="screen hidden">
+  <h1>Student attendance</h1>
+  <label>Trainer code<input id="in-trainer" autocapitalize="characters" autocomplete="off" spellcheck="false"></label>
+  <button id="btn-login" class="primary">Continue</button>
+  <p id="login-msg" class="msg"></p>
+  <p class="small">Needs internet the first time only.</p>
+</section>
+
+<section id="scr-home" class="screen hidden">
+  <header><b id="home-trainer"></b><button id="btn-change" class="link">Change trainer</button></header>
+  <h2>Pick batch</h2>
+  <div id="batch-list" class="grid"></div>
+  <button id="btn-start" class="primary" disabled>Start</button>
+  <div class="card">
+    <div>Waiting to send: <b id="pending-count">0</b></div>
+    <button id="btn-sync">Send now</button>
+    <p id="sync-msg" class="msg"></p>
+  </div>
+  <div class="row"><button id="btn-voice">Test voice</button><button id="btn-refresh">Refresh batches</button></div>
+  <p class="small" id="diag"></p>
+</section>
+
+<section id="scr-scan" class="screen hidden">
+  <div id="cam-wrap">
+    <video id="video" playsinline muted autoplay></video>
+    <div id="aim"></div>
+    <div id="flash"></div>
+    <div id="banner"><span id="banner-text">Starting camera</span><button id="btn-add-anyway" class="hidden">Add anyway</button></div>
+  </div>
+  <div id="scan-info"><span id="scan-batch"></span><span>Marked <b id="scan-count">0</b></span></div>
+  <ul id="recent"></ul>
+  <div class="row bottom"><button id="btn-addmark" class="secondary">Add / Mark</button><button id="btn-finish" class="primary">Finish</button></div>
+</section>
+
+<div id="dlg-add" class="dialog hidden">
+  <div class="dlg-body">
+    <div id="add-search-step">
+      <div class="row" style="align-items:center">
+        <input id="in-search" placeholder="Type 2 or 3 letters of name" autocomplete="off" spellcheck="false" style="flex:3">
+        <button id="btn-add-close" style="flex:1">Close</button>
+      </div>
+      <ul id="search-results"></ul>
+      <button id="btn-add-new" class="secondary hidden"></button>
+    </div>
+    <div id="add-photo-step" class="hidden">
+      <p id="photo-for" style="font-weight:700;margin:0 0 8px"></p>
+      <video id="video2" playsinline muted autoplay></video>
+      <div class="row" style="margin-top:10px"><button id="btn-photo-back">Back</button><button id="btn-photo-take" class="primary">Take photo</button></div>
+    </div>
+  </div>
+</div>
+
+<div id="dlg-finish" class="dialog hidden">
+  <div class="dlg-body">
+    <h2>Finish class</h2>
+    <p id="finish-summary" style="font-size:17px;line-height:1.6;margin:0"></p>
+    <div class="row"><button id="btn-finish-back">Back to scanning</button><button id="btn-submit" class="primary">Submit</button></div>
+  </div>
+</div>
+
+<script src="config.js"></script>
+<script src="jsQR.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
