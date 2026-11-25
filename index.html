@@ -17,6 +17,7 @@
   label { display:flex; flex-direction:column; gap:6px; font-weight:600; }
   input { font-size:18px; padding:12px; border:1px solid #cbd5e1; border-radius:10px; width:100%; }
   button { font-size:17px; padding:14px 16px; border-radius:12px; border:1px solid #cbd5e1; background:#fff; color:var(--ink); }
+  button:disabled { opacity:.45; }
   button.primary { background:var(--green); color:#fff; border-color:var(--green); font-weight:700; }
   button.secondary { background:var(--blue); color:#fff; border-color:var(--blue); font-weight:700; }
   .row { display:flex; gap:10px; } .row > * { flex:1; }
@@ -31,6 +32,18 @@
   .batch { text-align:left; display:flex; flex-direction:column; gap:3px; padding:14px 16px; }
   .batch b { font-size:20px; } .batch span { font-size:14px; color:var(--muted); }
 
+  .rc { background:#fff; border:1px solid var(--line); border-radius:12px; padding:10px 14px; font-size:15px; display:flex; justify-content:space-between; gap:8px; }
+  .rc b { font-size:16px; } .rc .rc-meta { color:var(--muted); font-size:13px; text-align:right; }
+  #mark-pane { position:absolute; inset:0; background:#0f172a; display:flex; align-items:center; justify-content:center; padding:24px; }
+  #mark-pane button { font-size:22px; padding:24px 20px; width:100%; }
+  #class-bar { display:flex; justify-content:space-between; align-items:center; gap:10px; padding:6px 14px; background:#fff; border-bottom:1px solid var(--line); font-size:14px; color:var(--muted); }
+  #class-bar button { padding:8px 12px; font-size:15px; }
+  #class-bar button.done { background:#dcfce7; border-color:#86efac; color:#14532d; }
+  #st-table { width:100%; border-collapse:collapse; font-size:15px; }
+  #st-table th, #st-table td { padding:8px 4px; border-bottom:1px solid var(--line); text-align:right; }
+  #st-table th:first-child, #st-table td:first-child { text-align:left; }
+  #st-table tr.total td { font-weight:700; }
+  .list li .name.link { color:#1d4ed8; }
   #scr-resume { justify-content:center; }
   #btn-resume { font-size:22px; padding:28px 16px; }
 
@@ -88,9 +101,10 @@
 
 <section id="scr-home" class="screen hidden">
   <div id="home-name"></div>
-  <button id="btn-punch" class="secondary"><span>Mark my attendance</span><span id="punch-status"></span></button>
   <h2>Start class</h2>
   <div id="batch-list"></div>
+  <h2 id="recent-title" class="hidden">Last classes</h2>
+  <div id="recent-classes"></div>
   <p id="pending-line" class="small hidden"></p>
   <p id="voice-warn" class="warn hidden">No offline voice on this phone. Names will not be spoken without internet.</p>
 </section>
@@ -105,8 +119,10 @@
     <div id="aim"></div>
     <div id="flash"></div>
     <div id="banner"><span id="banner-text">Starting camera</span></div>
+    <div id="mark-pane"><button id="btn-mark" class="secondary">Mark my attendance</button></div>
   </div>
   <div id="scan-info"><b class="label" id="scan-label"></b><span>Marked <b id="scan-count">0</b></span></div>
+  <div id="class-bar"><span id="class-status"></span><button id="btn-classphoto">Take class photo</button></div>
   <ul id="recent" class="list"></ul>
   <div class="row bottom"><button id="btn-nocard" class="secondary">No card</button><button id="btn-finish" class="primary">Finish</button></div>
 </section>
@@ -136,9 +152,19 @@
       <div class="tile manual"><b id="sum-manual">0</b><span>No card</span></div>
     </div>
     <p id="sum-extra" class="small"></p>
+    <button id="btn-sum-photo" class="secondary hidden">Take class photo (needed to submit)</button>
+    <p id="sum-photo-ok" class="small hidden"></p>
     <p id="sum-list-title"></p>
     <ul id="sum-list" class="list"></ul>
     <div class="row"><button id="btn-sum-back">Continue scanning</button><button id="btn-submit" class="primary">Submit</button></div>
+  </div>
+</div>
+
+<div id="dlg-student" class="dialog hidden">
+  <div class="dlg-body">
+    <b id="st-title"></b>
+    <p id="st-msg" class="small"></p>
+    <table id="st-table" class="hidden"><thead><tr><th>Course</th><th>Held</th><th>Attended</th><th>Absent</th><th>Absent (%)</th></tr></thead><tbody></tbody></table>
   </div>
 </div>
 
@@ -147,13 +173,14 @@
     <b>Admin</b>
     <p id="admin-diag" class="small"></p>
     <div class="row"><button id="btn-a-sync">Send now</button><button id="btn-a-voice">Test voice</button></div>
-    <div class="row"><button id="btn-a-refresh">Refresh batches</button><button id="btn-a-change">Change trainer</button></div>
+    <button id="btn-a-refresh">Refresh batches</button>
     <p id="admin-msg" class="msg"></p>
   </div>
 </div>
 
 <script src="config.js"></script>
 <script src="jsQR.js"></script>
+<script src="sender.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

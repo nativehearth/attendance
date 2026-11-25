@@ -1,12 +1,14 @@
 'use strict';
-/* Student attendance (demo v0.2): trainer page. */
+/* Student attendance (demo v0.3.1): trainer page. */
 
-const APP_VERSION = '0.2.1';
+const APP_VERSION = '0.3.1';
 const API_URL = (window.APP_CONFIG || {}).API_URL || '';
 const B32 = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const SAME_CARD_GAP_MS = 2500;   // a card kept in view is ignored until it has been out of view this long
 const OLD_SESSION_MS = 12 * 3600 * 1000;
 const ADMIN_HOLD_MS = 3000;
+const SNAPSHOT_EVERY = 10;       // on average 1 in 10 card scans saves a camera snapshot as evidence
+const FAST_GAP_MS = 1000;        // two different cards read faster than this count as a fast scan
 
 const $ = (id) => document.getElementById(id);
 
@@ -43,19 +45,20 @@ async function idb(mode, fn) {
 const recPut = (rec) => idb('readwrite', (st) => st.put(rec));
 const recDel = (id) => idb('readwrite', (st) => st.delete(id));
 const recAll = () => idb('readonly', (st) => st.getAll());
+const recGet = (id) => idb('readonly', (st) => st.get(id));
 
 /* ---------------- state ---------------- */
 const S = {
   config: LS.get('config'),
   session: LS.get('session'),
-  marked: new Map(),   // "cardBatch|roll" -> scan record
+  pendingBatch: null,  // batch tapped, own attendance not yet marked
+  marked: new Map(),   // studentId -> scan record
   recent: [],
-  stream: null, photoStream: null,
-  detector: null, detectorErrors: 0,
+  stream: null, detector: null, detectorErrors: 0,
   scanning: false, paused: false,
   lastCode: '', lastCodeAt: 0,
-  audio: null, wake: null, hmacKey: null,
-  ignorePop: 0, punching: false,
+  wake: null, hmacKey: null, registered: null,
+  ignorePop: 0, watchId: null, lastFix: null,
 };
 
 /* ---------------- helpers ---------------- */
@@ -70,10 +73,14 @@ function localTime(ts) { const d = new Date(ts); return pad(d.getHours()) + ':' 
 function esc(s) { return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
 function titleCase(s) { return s.replace(/\s+/g, ' ').trim().replace(/\b\w/g, (c) => c.toUpperCase()); }
 function show(id) { ['scr-login', 'scr-home', 'scr-resume', 'scr-scan'].forEach((s) => $(s).classList.toggle('hidden', s !== id)); }
-function setting(name, dflt) { const v = ((S.config || {}).settings || {})[name]; return v === undefined || v === '' ? dflt : v; }
 function batchInfo(code) { return ((S.config || {}).batches || []).find((b) => b.code === code) || null; }
-function labelOf(code) { const b = batchInfo(code); return (b && b.label) || ((S.config || {}).labels || {})[code] || code; }
+function labelOf(code) { const b = batchInfo(code); return (b && b.label) || code; }
 function roster(code) { return (((S.config || {}).rosters || {})[code]) || []; }
+function inRoster(code, id) { return roster(code).find((s) => s.id === id) || null; }
+function isRegistered(id) {
+  if (!S.registered) S.registered = new Set((S.config && S.config.registered) || []);
+  return S.registered.has(id);
+}
 
 /* ---------------- back button: each screen or dialog is a history layer ---------------- */
 const layers = [];
@@ -98,10 +105,10 @@ async function getHmacKey() {
   S.hmacKey = await crypto.subtle.importKey('raw', new TextEncoder().encode(S.config.cardKey), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
   return S.hmacKey;
 }
-async function checkCode(batch, roll, name) {
+async function checkCode(id, name) {
   const key = await getHmacKey();
   if (!key) return null;
-  const sig = new Uint8Array(await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(batch + '|' + roll + '|' + name)));
+  const sig = new Uint8Array(await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(id + '|' + name)));
   const v = (sig[0] << 22) | (sig[1] << 14) | (sig[2] << 6) | (sig[3] >> 2);
   let s = '';
   for (let i = 0; i < 6; i++) s += B32[(v >>> (25 - 5 * i)) & 31];
@@ -109,11 +116,11 @@ async function checkCode(batch, roll, name) {
 }
 async function parseCard(text) {
   const p = String(text).trim().split('|');
-  if (p.length !== 5 || p[0] !== 'TNS1') return null;
-  const [, batch, roll, name, code] = p;
-  if (!batch || !roll || !name || !code) return null;
-  const expected = await checkCode(batch, roll, name);
-  return expected && expected === code ? { batch, roll, name } : null;
+  if (p.length !== 4 || p[0] !== 'TNS2') return null;
+  const [, id, name, code] = p;
+  if (!id || !name || !code) return null;
+  const expected = await checkCode(id, name);
+  return expected && expected === code ? { id, name } : null;
 }
 
 /* ---------------- server ---------------- */
@@ -132,12 +139,12 @@ async function api(action, body = {}, timeoutMs = 30000) {
   } finally { clearTimeout(t); }
 }
 function saveConfig(r) {
-  S.config = { trainer: r.trainer, batches: r.batches, labels: r.labels, rosters: r.rosters, settings: r.settings, cardKey: r.cardKey, at: Date.now() };
-  S.hmacKey = null;
+  S.config = { trainer: r.trainer, batches: r.batches, rosters: r.rosters, registered: r.registered, cardKey: r.cardKey, at: Date.now() };
+  S.hmacKey = null; S.registered = null;
   LS.set('config', S.config);
 }
 
-/* ---------------- sound, speech, vibration ---------------- */
+/* ---------------- speech and vibration ---------------- */
 let voice = null;
 function pickVoice() {
   if (!('speechSynthesis' in window)) return;
@@ -149,7 +156,7 @@ function pickVoice() {
 function updateVoiceWarn() {
   if (!('speechSynthesis' in window)) return;
   const vs = speechSynthesis.getVoices();
-  if (!vs.length) return; // voices still loading
+  if (!vs.length) return;
   $('voice-warn').classList.toggle('hidden', vs.some((v) => /^en/i.test(v.lang) && v.localService));
 }
 if ('speechSynthesis' in window) { pickVoice(); speechSynthesis.onvoiceschanged = pickVoice; }
@@ -163,34 +170,24 @@ function say(text) {
   };
   try { if (speechSynthesis.speaking || speechSynthesis.pending) { speechSynthesis.cancel(); setTimeout(go, 60); } else { go(); } } catch (e) { /* ignore */ }
 }
-function unlockAudio() {
-  try { if (!S.audio) S.audio = new (window.AudioContext || window.webkitAudioContext)(); if (S.audio.state === 'suspended') S.audio.resume(); } catch (e) { /* ignore */ }
-}
-function beep(freq, dur, type = 'sine') {
-  const a = S.audio;
-  if (!a) return;
-  try {
-    const o = a.createOscillator(); const g = a.createGain();
-    o.type = type; o.frequency.value = freq; g.gain.value = 0.3;
-    o.connect(g); g.connect(a.destination); o.start(); o.stop(a.currentTime + dur);
-  } catch (e) { /* ignore */ }
-}
+function unlockSpeech() { say(' '); }
 function vibrate(p) { try { if (navigator.vibrate) navigator.vibrate(p); } catch (e) { /* ignore */ } }
-function feedback(kind) {
-  if (kind === 'ok') vibrate(80);
-  if (kind === 'dup') { beep(880, 0.12); vibrate([40, 40, 40]); }
-  if (kind === 'other') { beep(660, 0.15); vibrate([120, 60, 120]); }
-  if (kind === 'invalid') { beep(150, 0.4, 'square'); vibrate(400); }
-}
 
-/* ---------------- location ---------------- */
-function getPosition(timeoutMs = 15000) {
-  return new Promise((resolve) => {
-    if (!('geolocation' in navigator)) { resolve(null); return; }
-    navigator.geolocation.getCurrentPosition(
-      (p) => resolve({ lat: p.coords.latitude, lng: p.coords.longitude, acc: p.coords.accuracy }),
-      () => resolve(null), { enableHighAccuracy: true, timeout: timeoutMs, maximumAge: 60000 });
-  });
+/* ---------------- location: keep trying during the whole class ---------------- */
+function startLocation() {
+  if (!('geolocation' in navigator) || S.watchId !== null) return;
+  const onFix = (p) => {
+    const fix = { lat: p.coords.latitude, lng: p.coords.longitude, acc: p.coords.accuracy };
+    S.lastFix = fix;
+    if (S.session && (!S.session.gps || fix.acc < S.session.gps.acc)) { S.session.gps = fix; LS.set('session', S.session); }
+  };
+  const opts = { enableHighAccuracy: true, maximumAge: 600000, timeout: 60000 };
+  navigator.geolocation.getCurrentPosition(onFix, () => {}, opts); // a recent last-known position is accepted at once
+  S.watchId = navigator.geolocation.watchPosition(onFix, () => {}, opts);
+}
+function stopLocation() {
+  if (S.watchId !== null) { try { navigator.geolocation.clearWatch(S.watchId); } catch (e) { /* ignore */ } }
+  S.watchId = null;
 }
 
 /* ---------------- login ---------------- */
@@ -222,7 +219,7 @@ async function refreshConfig(quiet) {
 }
 
 /* ---------------- home ---------------- */
-function showHome() {
+async function showHome() {
   show('scr-home');
   const t = S.config.trainer;
   $('home-name').textContent = t.name + ' (' + t.code + ')';
@@ -232,16 +229,24 @@ function showHome() {
     const btn = document.createElement('button');
     btn.className = 'batch';
     btn.innerHTML = '<b>' + esc(b.label) + '</b><span>' + esc(b.code) + ' · ' + esc(b.course) + '</span>';
-    btn.onclick = () => startSession(b.code);
+    btn.onclick = () => openClass(b.code);
     list.appendChild(btn);
   });
   if (!(S.config.batches || []).length) list.innerHTML = '<p class="small">No batches assigned. Ask admin.</p>';
-  const lp = LS.get('lastPunch');
-  $('punch-status').textContent = lp && localDate(lp.ts) === localDate(Date.now()) ? 'Marked ' + lp.time.slice(0, 5) : '';
+  await renderRecentClasses();
   updatePending();
   updateVoiceWarn();
 }
+async function renderRecentClasses() {
+  const rc = LS.get('recentClasses', []);
+  const waiting = new Set((await recAll()).filter((r) => r.kind === 'session').map((r) => r.id));
+  $('recent-title').classList.toggle('hidden', !rc.length);
+  $('recent-classes').innerHTML = rc.map((c) =>
+    '<div class="rc"><span><b>' + esc(c.label) + '</b><br>' + esc(c.date.slice(8) + '/' + c.date.slice(5, 7)) + ' · ' + esc(c.start.slice(0, 5)) + '</span>' +
+    '<span class="rc-meta">Present ' + c.present + ' · Absent ' + c.absent + '<br>' + (waiting.has(c.id) ? 'Waiting to send' : 'Sent') + '</span></div>').join('');
+}
 async function updatePending() {
+  if (syncing) return 0;
   try {
     const n = (await recAll()).filter((r) => r.ready).length;
     $('pending-line').textContent = n + ' item' + (n === 1 ? '' : 's') + ' waiting to send. ' + (navigator.onLine ? 'Sending automatically.' : 'Will send when online.');
@@ -264,76 +269,63 @@ async function openAdmin() {
   $('dlg-admin').classList.remove('hidden');
   pushLayer('admin', () => { $('dlg-admin').classList.add('hidden'); });
 }
-async function changeTrainer() {
-  const pending = (await recAll()).filter((r) => r.ready).length;
-  if (!confirm((pending ? pending + ' items are not sent yet. They will still be sent later. ' : '') + 'Change trainer on this phone?')) return;
-  LS.del('config'); S.config = null; S.hmacKey = null;
-  dropAllLayers();
-  $('dlg-admin').classList.add('hidden');
-  $('in-trainer').value = ''; $('login-msg').textContent = '';
-  show('scr-login');
-}
 
-/* ---------------- own attendance (punch) ---------------- */
-async function doPunch() {
-  if (S.punching) return;
-  S.punching = true;
-  unlockAudio();
-  if (setting('Selfie on punch', 'N').toUpperCase() === 'Y') {
-    try {
-      S.photoStream = await navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: 'user' } });
-    } catch (e) { S.punching = false; $('punch-status').textContent = 'Camera not available'; return; }
-    openPhoto({ title: 'Selfie', stream: S.photoStream, onTaken: (img) => { popLayers(1); finishPunch(img); },
-      onClose: () => { stopPhotoStream(); if (S.punching && !S.selfieTaken) S.punching = false; S.selfieTaken = false; } });
-    return;
-  }
-  finishPunch(null);
-}
-async function finishPunch(selfie) {
-  S.selfieTaken = !!selfie;
-  $('punch-status').textContent = 'Getting location...';
-  const gps = await getPosition(15000);
-  const ts = Date.now();
-  const rec = { id: uid(), kind: 'punch', ready: true, ts, date: localDate(ts), time: localTime(ts), trainer: S.config.trainer.code, gps, selfie };
-  await recPut(rec);
-  LS.set('lastPunch', { ts, time: rec.time });
-  $('punch-status').textContent = 'Marked ' + rec.time.slice(0, 5) + (gps ? '' : ' · no location');
-  say('Attendance marked');
-  vibrate(80);
-  S.punching = false;
-  updatePending();
-  sync(false);
-}
-
-/* ---------------- class session ---------------- */
-async function startSession(batch) {
-  unlockAudio();
-  say(' ');
-  const now = Date.now();
-  S.session = { id: uid(), batch, date: localDate(now), startTs: now, trainer: S.config.trainer.code, gps: null, gpsEnd: null,
-    fastScans: 0, lastQrTs: 0 };
-  LS.set('session', S.session);
-  getPosition(20000).then((g) => { if (g && S.session && !S.session.gps) { S.session.gps = g; LS.set('session', S.session); } });
-  await openScan();
-}
-async function openScan() {
+/* ---------------- class: tap batch, mark own attendance, scan, class photo, finish ---------------- */
+function openClass(batch) {
+  unlockSpeech();
+  S.pendingBatch = batch;
   show('scr-scan');
   pushLayer('scan', backFromScan);
-  $('scan-label').textContent = labelOf(S.session.batch);
-  S.marked = new Map();
-  S.recent = [];
-  (await recAll()).filter((r) => r.kind === 'scan' && r.sessionId === S.session.id).sort((a, b) => a.ts - b.ts)
-    .forEach((r) => { S.marked.set(r.cardBatch + '|' + r.roll, r); S.recent.push(r); });
+  $('scan-label').textContent = labelOf(batch);
+  $('mark-pane').classList.remove('hidden');
+  $('class-bar').classList.add('hidden');
+  $('btn-nocard').disabled = true; $('btn-finish').disabled = true;
+  S.marked = new Map(); S.recent = [];
   renderList();
+}
+async function markOwnAttendance() {
+  const now = Date.now();
+  S.session = { id: uid(), batch: S.pendingBatch, date: localDate(now), classStartTs: now, trainer: S.config.trainer.code,
+    gps: null, fastScans: 0, lastQrTs: 0, photoTs: null };
+  S.pendingBatch = null;
+  LS.set('session', S.session);
+  startLocation();
+  say('Attendance marked');
+  vibrate(80);
+  await enterClass();
+}
+async function enterClass() {
+  $('mark-pane').classList.add('hidden');
+  $('class-bar').classList.remove('hidden');
+  $('btn-nocard').disabled = false; $('btn-finish').disabled = false;
+  $('scan-label').textContent = labelOf(S.session.batch);
+  S.marked = new Map(); S.recent = [];
+  (await recAll()).filter((r) => r.kind === 'scan' && r.sessionId === S.session.id).sort((a, b) => a.ts - b.ts)
+    .forEach((r) => { S.marked.set(r.studentId, r); S.recent.push(r); });
+  renderList();
+  renderClassBar();
   try { await startCamera(); } catch (e) { banner('red', 'Camera not available: ' + e.message); return; }
   banner('', 'Ready · show card');
   requestWake();
   if (!S.scanning) { S.scanning = true; tick(); }
 }
+async function resumeClass() {
+  unlockSpeech();
+  show('scr-scan');
+  pushLayer('scan', backFromScan);
+  startLocation();
+  await enterClass();
+}
+function renderClassBar() {
+  const s = S.session;
+  $('class-status').textContent = 'Attendance marked ' + localTime(s.classStartTs).slice(0, 5);
+  const btn = $('btn-classphoto');
+  btn.textContent = s.photoTs ? 'Class photo ' + localTime(s.photoTs).slice(0, 5) + ' ✓' : 'Take class photo';
+  btn.classList.toggle('done', !!s.photoTs);
+}
 function backFromScan() {
-  if (S.marked.size === 0) { // nothing scanned: leave without saving a class
-    S.scanning = false; stopCamera(); releaseWake();
-    LS.del('session'); S.session = null;
+  if (!S.session) { // batch opened but own attendance not marked: nothing saved
+    S.pendingBatch = null;
     showHome();
     return true;
   }
@@ -361,9 +353,6 @@ async function startCamera() {
 function stopCamera() {
   if (S.stream) { S.stream.getTracks().forEach((t) => t.stop()); S.stream = null; }
   $('video').srcObject = null;
-}
-function stopPhotoStream() {
-  if (S.photoStream) { S.photoStream.getTracks().forEach((t) => t.stop()); S.photoStream = null; }
 }
 
 const canvas = document.createElement('canvas');
@@ -401,44 +390,33 @@ function frameJpeg(video, maxSide, quality) {
 }
 
 async function onCode(text) {
+  if (!S.session) return;
   const now = Date.now();
   if (text === S.lastCode && now - S.lastCodeAt < SAME_CARD_GAP_MS) { S.lastCodeAt = now; return; }
   S.lastCode = text; S.lastCodeAt = now;
   const card = await parseCard(text);
-  if (!card) { feedback('invalid'); banner('red', 'Card not valid'); say('card not valid'); return; }
-  const key = card.batch + '|' + card.roll;
-  if (S.marked.has(key)) { feedback('dup'); banner('amber', card.name + ' · already marked'); return; }
-  const other = card.batch !== S.session.batch;
-  // fast-scan check: two different cards read faster than a student can walk up
-  const gapMs = Number(setting('Fast scan gap (seconds)', '1')) * 1000;
-  if (S.session.lastQrTs && now - S.session.lastQrTs < gapMs) S.session.fastScans++;
+  if (!card) { vibrate(400); banner('red', 'Card not valid'); say('card not valid'); return; }
+  if (S.marked.has(card.id)) { vibrate([40, 40, 40]); banner('amber', 'Already marked'); say('already marked'); return; }
+  const listed = inRoster(S.session.batch, card.id);
+  const kind = listed ? 'in' : (isRegistered(card.id) ? 'other' : 'notreg');
+  const name = listed ? listed.label : card.name;
+  if (S.session.lastQrTs && now - S.session.lastQrTs < FAST_GAP_MS) S.session.fastScans++;
   S.session.lastQrTs = now;
   LS.set('session', S.session);
-  const n = Math.max(1, Number(setting('Snapshot every Nth scan', '10')) || 10);
-  const snapshot = Math.random() < 1 / n ? frameJpeg($('video'), 480, 0.5) : null;
-  // genuine card but not on the downloaded batch list (added after last update, or marked left): accept, flag for admin
-  const list = roster(card.batch);
-  const unlisted = !other && list.length && !list.some((st) => String(st.roll) === String(card.roll));
-  await addRecord({ roll: card.roll, name: card.name, method: 'QR',
-    flag: other ? 'other batch: ' + card.batch : (unlisted ? 'not on batch list' : ''), cardBatch: card.batch, snapshot });
-  if (other) {
-    feedback('other');
-    banner('amber', card.name + ' · other batch (' + labelOf(card.batch) + ')');
-    say(card.name + ', other batch');
-  } else {
-    feedback('ok');
-    banner('green', card.name);
-    say(card.name);
-  }
+  const snapshot = Math.random() < 1 / SNAPSHOT_EVERY ? frameJpeg($('video'), 480, 0.5) : null;
+  await addRecord({ studentId: card.id, name, method: 'QR', flag: kind === 'other' ? 'other batch' : (kind === 'notreg' ? 'not registered' : ''), snapshot });
+  if (kind === 'in') { vibrate(80); banner('green', name); say(name); }
+  else if (kind === 'other') { vibrate([120, 60, 120]); banner('amber', name + ' · other batch'); say(name + ', other batch'); }
+  else { vibrate([120, 60, 120]); banner('amber', name + ' · not registered, added'); say(name + ', not registered'); }
 }
 
-async function addRecord({ roll, name, method, flag = '', photo = null, snapshot = null, isNew = false, cardBatch = null }) {
+async function addRecord({ studentId, name, method, flag = '', photo = null, snapshot = null }) {
   const ts = Date.now();
   const s = S.session;
-  const rec = { id: uid(), kind: 'scan', sessionId: s.id, ts, date: localDate(ts), time: localTime(ts), batch: s.batch, roll, name, method,
-    flag, trainer: s.trainer, gps: s.gps, photo, snapshot, isNew, cardBatch: cardBatch || s.batch, ready: false };
+  const rec = { id: uid(), kind: 'scan', sessionId: s.id, ts, date: localDate(ts), time: localTime(ts), batch: s.batch, studentId, name, method,
+    flag, trainer: s.trainer, photo, snapshot, ready: false };
   await recPut(rec);
-  S.marked.set(rec.cardBatch + '|' + roll, rec);
+  S.marked.set(studentId, rec);
   S.recent.push(rec);
   renderList();
   return rec;
@@ -455,24 +433,28 @@ function banner(color, text) {
   }
 }
 function badgeFor(r) {
-  if (String(r.flag || '').indexOf('other batch') === 0) return '<span class="badge flag">other batch</span>';
-  if (r.flag) return '<span class="badge flag">not on list</span>';
+  if (r.flag === 'other batch') return '<span class="badge flag">other batch</span>';
+  if (r.flag === 'not registered') return '<span class="badge new">not registered</span>';
   if (r.method !== 'QR') return '<span class="badge ' + r.method + '">' + (r.method === 'manual' ? 'no card' : 'new') + '</span>';
   return '';
 }
 function rowHtml(r) {
-  return (r.photo ? '<img alt="" src="' + r.photo + '">' : '') + '<span class="name">' + esc(r.name) + badgeFor(r) + '</span>' +
-    '<span class="meta">' + esc(r.roll) + '<br>' + r.time.slice(0, 5) + '</span><button class="x" aria-label="Remove">✕</button>';
+  return (r.photo ? '<img alt="" src="' + r.photo + '">' : '') + '<span class="name link">' + esc(r.name) + badgeFor(r) + '</span>' +
+    '<span class="meta">' + esc(r.studentId) + '<br>' + r.time.slice(0, 5) + '</span><button class="x" aria-label="Remove">✕</button>';
+}
+function wireRow(li, r, after) {
+  li.querySelector('.x').onclick = (e) => { e.stopPropagation(); removeRecord(r, after); };
+  li.querySelector('.name').onclick = () => openStudent(r.studentId, r.name);
 }
 function renderList() {
   $('scan-count').textContent = S.marked.size;
   const ul = $('recent');
   ul.innerHTML = '';
-  if (!S.recent.length) { ul.innerHTML = '<li class="empty">Names appear here as cards are scanned.</li>'; return; }
+  if (!S.recent.length) { ul.innerHTML = '<li class="empty">Names appear here as cards are scanned. Tap a name to see the record.</li>'; return; }
   S.recent.forEach((r) => {
     const li = document.createElement('li');
     li.innerHTML = rowHtml(r);
-    li.querySelector('.x').onclick = () => removeRecord(r);
+    wireRow(li, r);
     ul.appendChild(li);
   });
   ul.scrollTop = ul.scrollHeight;
@@ -480,40 +462,58 @@ function renderList() {
 async function removeRecord(r, after) {
   const wasPaused = S.paused;
   S.paused = true;
-  const ok = confirm('Remove ' + r.name + ' (' + r.roll + ')?');
+  const ok = confirm('Remove ' + r.name + ' (' + r.studentId + ')?');
   S.paused = wasPaused;
   if (!ok) return;
   await recDel(r.id);
-  S.marked.delete(r.cardBatch + '|' + r.roll);
+  S.marked.delete(r.studentId);
   S.recent = S.recent.filter((x) => x.id !== r.id);
   S.lastCode = '';
   renderList();
   if (after) after();
 }
 
-/* ---------------- photo dialog (no card, absent student, selfie) ---------------- */
+/* ---------------- photo dialog (no card, absent student, class photo) ---------------- */
 let photoOpts = null;
 function openPhoto(opts) {
   photoOpts = opts;
   $('photo-title').textContent = opts.title;
   const v = $('video-photo');
-  v.srcObject = opts.stream || S.stream;
+  v.srcObject = S.stream;
   v.play().catch(() => {});
   $('dlg-photo').classList.remove('hidden');
+  const wasPaused = S.paused;
+  S.paused = true;
   pushLayer('photo', () => {
     $('dlg-photo').classList.add('hidden');
     $('video-photo').srcObject = null;
-    const o = photoOpts; photoOpts = null;
-    if (o && o.onClose) o.onClose();
+    photoOpts = null;
+    S.paused = wasPaused;
   });
 }
 $('btn-photo-take').onclick = async () => {
   if (!photoOpts) return;
-  const img = frameJpeg($('video-photo'), 640, 0.6);
-  if (!img) return;
   const o = photoOpts;
+  const img = frameJpeg($('video-photo'), o.maxSide || 640, o.quality || 0.6);
+  if (!img) return;
   await o.onTaken(img);
 };
+function takeClassPhoto(after) {
+  openPhoto({
+    title: 'Class photo: fit the whole class in the frame', maxSide: 1280, quality: 0.7,
+    onTaken: async (img) => {
+      const ts = Date.now();
+      await recPut({ id: S.session.id + '-photo', kind: 'classphoto', sessionId: S.session.id, ts, img, ready: false });
+      S.session.photoTs = ts;
+      LS.set('session', S.session);
+      popLayers(1);
+      renderClassBar();
+      vibrate(80);
+      banner('green', 'Class photo saved');
+      if (after) setTimeout(after, 50);
+    },
+  });
+}
 
 /* ---------------- No card ---------------- */
 function openNoCard() {
@@ -532,17 +532,16 @@ function renderSearch() {
   const btnNew = $('btn-add-new');
   btnNew.classList.add('hidden');
   if (q.length < 2) return;
-  const list = roster(S.session.batch);
-  const matches = list.filter((s) => {
+  const matches = roster(S.session.batch).filter((s) => {
     const n = s.name.toLowerCase();
-    return n.split(/\s+/).some((w) => w.startsWith(q)) || n.includes(q) || String(s.roll).startsWith(q);
+    return n.split(/\s+/).some((w) => w.startsWith(q)) || n.includes(q) || s.id.toLowerCase().includes(q);
   }).slice(0, 8);
   matches.forEach((s) => {
     const li = document.createElement('li');
-    const done = S.marked.has(S.session.batch + '|' + s.roll);
-    li.textContent = s.name + ' · ' + s.roll + (done ? ' · already marked' : '');
+    const done = S.marked.has(s.id);
+    li.textContent = s.label + ' · ' + s.id + (done ? ' · already marked' : '');
     if (done) li.className = 'empty';
-    else { li.className = 'tap'; li.onclick = () => photoForManual({ roll: String(s.roll), name: s.name, method: 'manual' }, 2); }
+    else { li.className = 'tap'; li.onclick = () => photoForManual({ studentId: s.id, name: s.label, method: 'manual' }, 2); }
     ul.appendChild(li);
   });
   if (!matches.length && q.length >= 3) {
@@ -555,16 +554,17 @@ function addNew() {
   if (name.length < 3) return;
   const a = new Uint8Array(4);
   crypto.getRandomValues(a);
-  photoForManual({ roll: 'NEW-' + Array.from(a, (b) => B32[b & 31]).join(''), name, method: 'new', isNew: true }, 2);
+  const college = (batchInfo(S.session.batch) || {}).college || 'NEW';
+  photoForManual({ studentId: college + '-NEW-' + Array.from(a, (b) => B32[b & 31]).join(''), name, method: 'new' }, 2);
 }
 // layersToClose: 2 from No card (photo + search), 1 from the summary's absent list (photo only)
 function photoForManual(t, layersToClose, after) {
   openPhoto({
     title: (t.method === 'new' ? 'New student: ' : 'Photo of ') + t.name,
     onTaken: async (img) => {
-      await addRecord({ roll: t.roll, name: t.name, method: t.method, photo: img, isNew: !!t.isNew });
+      await addRecord({ studentId: t.studentId, name: t.name, method: t.method, photo: img });
       popLayers(layersToClose);
-      feedback('ok');
+      vibrate(80);
       banner('green', t.name + ' · marked (' + (t.method === 'new' ? 'new' : 'no card') + ')');
       say(t.name);
       if (after) setTimeout(after, 50);
@@ -572,23 +572,43 @@ function photoForManual(t, layersToClose, after) {
   });
 }
 
+/* ---------------- student record (needs internet) ---------------- */
+async function openStudent(id, name) {
+  $('st-title').textContent = name + ' · ' + id;
+  $('st-table').classList.add('hidden');
+  $('st-msg').textContent = navigator.onLine ? 'Loading...' : 'Needs internet to show the full record.';
+  $('dlg-student').classList.remove('hidden');
+  const wasPaused = S.paused;
+  S.paused = true;
+  pushLayer('student', () => { $('dlg-student').classList.add('hidden'); S.paused = wasPaused; });
+  if (!navigator.onLine) return;
+  try {
+    const r = await api('student', { trainer: S.config.trainer.code, studentId: id }, 20000);
+    if (!r.ok) { $('st-msg').textContent = r.error || 'Not available'; return; }
+    const row = (c, cls) => '<tr' + (cls ? ' class="' + cls + '"' : '') + '><td>' + esc(c.course) + '</td><td>' + c.held + '</td><td>' + c.attended +
+      '</td><td>' + c.absent + '</td><td>' + c.absentPct + '</td></tr>';
+    $('st-table').querySelector('tbody').innerHTML = r.courses.map((c) => row(c)).join('') +
+      row(Object.assign({ course: 'All courses' }, r.total), 'total');
+    $('st-table').classList.remove('hidden');
+    $('st-msg').textContent = r.student.college + ' · classes submitted so far (this class counts after it is sent)';
+  } catch (e) { $('st-msg').textContent = 'Could not load (' + e.message + ').'; }
+}
+
 /* ---------------- Finish: summary with present / absent lists ---------------- */
 function counts() {
   const recs = [...S.marked.values()];
-  const isOther = (r) => String(r.flag || '').indexOf('other batch') === 0;
-  const inBatch = recs.filter((r) => !isOther(r));
+  const isOther = (r) => r.flag === 'other batch';
+  const present = recs.filter((r) => !isOther(r));
   const list = roster(S.session.batch);
-  const rolls = new Set(inBatch.map((r) => String(r.roll)));
+  const ids = new Set(present.map((r) => r.studentId));
   return {
-    present: inBatch, other: recs.filter(isOther),
-    absent: list.filter((s) => !rolls.has(String(s.roll))),
+    present, other: recs.filter(isOther), absent: list.filter((s) => !ids.has(s.id)),
     manual: recs.filter((r) => r.method === 'manual').length, newc: recs.filter((r) => r.method === 'new').length,
-    batchSize: list.length,
+    notReg: recs.filter((r) => r.flag === 'not registered').length, batchSize: list.length,
   };
 }
 function openSummary() {
   S.paused = true;
-  getPosition(15000).then((g) => { if (g && S.session) { S.session.gpsEnd = g; LS.set('session', S.session); } });
   $('dlg-summary').classList.remove('hidden');
   $('sum-list-title').textContent = '';
   $('sum-list').innerHTML = '';
@@ -603,121 +623,102 @@ function renderSummary() {
   $('sum-manual').textContent = c.manual;
   const extra = [];
   if (c.newc) extra.push('New ' + c.newc);
+  if (c.notReg) extra.push('Not registered ' + c.notReg);
   if (c.other.length) extra.push('Other batch ' + c.other.length + ' (' + c.other.map((r) => r.name).join(', ') + ')');
   if (!c.batchSize) extra.push('Batch list not downloaded, absent count not available');
   $('sum-extra').textContent = extra.join(' · ');
+  const hasPhoto = !!S.session.photoTs;
+  $('btn-sum-photo').classList.toggle('hidden', hasPhoto);
+  $('sum-photo-ok').classList.toggle('hidden', !hasPhoto);
+  if (hasPhoto) $('sum-photo-ok').textContent = 'Class photo taken ' + localTime(S.session.photoTs).slice(0, 5);
+  $('btn-submit').disabled = !hasPhoto;
 }
 function showSumList(which) {
   const c = counts();
   const ul = $('sum-list');
   ul.innerHTML = '';
-  S.sumList = which;
   if (which === 'present') {
     $('sum-list-title').textContent = 'Present (' + c.present.length + ') · tap ✕ to remove';
     c.present.slice().sort((a, b) => a.name.localeCompare(b.name)).forEach((r) => {
       const li = document.createElement('li');
       li.innerHTML = rowHtml(r);
-      li.querySelector('.x').onclick = () => removeRecord(r, () => { renderSummary(); showSumList('present'); });
+      wireRow(li, r, () => { renderSummary(); showSumList('present'); });
       ul.appendChild(li);
     });
   } else {
     $('sum-list-title').textContent = 'Absent (' + c.absent.length + ') · tap a name to mark present';
-    c.absent.slice().sort((a, b) => a.name.localeCompare(b.name)).forEach((s) => {
+    c.absent.slice().sort((a, b) => a.label.localeCompare(b.label)).forEach((s) => {
       const li = document.createElement('li');
       li.className = 'tap';
-      li.innerHTML = '<span class="name">' + esc(s.name) + '</span><span class="meta">' + esc(s.roll) + '</span>';
-      li.onclick = () => photoForManual({ roll: String(s.roll), name: s.name, method: 'manual' }, 1,
-        () => { renderSummary(); showSumList('absent'); });
+      li.innerHTML = '<span class="name">' + esc(s.label) + '</span><span class="meta">' + esc(s.id) + '</span>';
+      li.onclick = () => photoForManual({ studentId: s.id, name: s.label, method: 'manual' }, 1, () => { renderSummary(); showSumList('absent'); });
       ul.appendChild(li);
     });
     if (!c.absent.length) ul.innerHTML = '<li class="empty">No one absent.</li>';
   }
 }
-async function submitSession() {
+async function submitSession(force) {
   const s = S.session;
+  if (!s || (!s.photoTs && !force)) return;
   const c = counts();
   const now = Date.now();
   S.scanning = false;
   stopCamera();
+  stopLocation();
   releaseWake();
   dropAllLayers();
   $('dlg-summary').classList.add('hidden');
   S.paused = false;
   const all = await recAll();
-  for (const r of all) {
-    if (r.kind === 'scan' && r.sessionId === s.id) { r.ready = true; if (!r.gps && s.gps) r.gps = s.gps; await recPut(r); }
-  }
-  // class start: trainer's own attendance marked that day before attendance began; else first app open that day
-  const lp = LS.get('lastPunch');
-  const fo = LS.get('firstOpen');
-  let classStart = '', classStartSource = '';
-  if (lp && localDate(lp.ts) === s.date && lp.ts <= s.startTs) { classStart = lp.time; classStartSource = 'own attendance'; }
-  else if (fo && fo.date === s.date) { classStart = fo.time; classStartSource = 'app opened'; }
+  const scans = all.filter((r) => r.kind === 'scan' && r.sessionId === s.id).sort((a, b) => a.ts - b.ts);
+  for (const r of scans) { r.ready = true; await recPut(r); }
+  const photo = await recGet(s.id + '-photo');
   await recPut({ id: s.id, kind: 'session', ready: true, date: s.date, trainer: s.trainer, batch: s.batch, batchSize: c.batchSize,
-    present: c.present.length, absent: c.absent.length, manual: c.manual, newc: c.newc, other: c.other.length,
-    classStart, classStartSource, start: localTime(s.startTs), finish: localTime(now), gps: s.gps, gpsEnd: s.gpsEnd, fastScans: s.fastScans });
+    present: c.present.length, absent: c.absent.length, manual: c.manual, newc: c.newc, other: c.other.length, notReg: c.notReg,
+    classStart: localTime(s.classStartTs), photoTime: s.photoTs ? localTime(s.photoTs) : '', photo: photo ? photo.img : null,
+    attendanceStart: scans.length ? scans[0].time : '', attendanceEnd: localTime(now),
+    gps: s.gps, gpsEnd: S.lastFix || s.gps, fastScans: s.fastScans });
+  if (photo) await recDel(photo.id);
+  const rc = LS.get('recentClasses', []);
+  rc.unshift({ id: s.id, label: labelOf(s.batch), date: s.date, start: localTime(s.classStartTs), present: c.present.length, absent: c.absent.length });
+  LS.set('recentClasses', rc.slice(0, 2));
   LS.del('session');
   S.session = null; S.marked = new Map(); S.recent = [];
-  showHome();
+  await showHome();
+  requestBackgroundSend();
   sync(false);
 }
 
-/* ---------------- sending ---------------- */
+/* ---------------- sending (shared with the service worker: sender.js) ---------------- */
 let syncing = false;
-function gpsFields(g, suffix = '') {
-  const o = {};
-  o['lat' + suffix] = g ? g.lat : null; o['lng' + suffix] = g ? g.lng : null; o['acc' + suffix] = g ? g.acc : null;
-  return o;
+let syncLeft = 0;
+function showProgress(text) {
+  $('pending-line').textContent = text;
+  $('pending-line').classList.toggle('hidden', !text);
+  $('admin-msg').textContent = text;
 }
-function scanForServer(r) {
-  return Object.assign({ id: r.id, sessionId: r.sessionId, date: r.date, time: r.time, batch: r.batch, cardBatch: r.cardBatch, roll: r.roll,
-    name: r.name, method: r.method, flag: r.flag, trainer: r.trainer, isNew: r.isNew, photo: r.photo || null, snapshot: r.snapshot || null }, gpsFields(r.gps));
-}
-function sessionForServer(r) {
-  return Object.assign({ id: r.id, date: r.date, trainer: r.trainer, batch: r.batch, batchSize: r.batchSize, present: r.present, absent: r.absent,
-    manual: r.manual, newc: r.newc, other: r.other, classStart: r.classStart, classStartSource: r.classStartSource,
-    start: r.start, finish: r.finish, fastScans: r.fastScans }, gpsFields(r.gps), gpsFields(r.gpsEnd, 'End'));
-}
-function punchForServer(r) {
-  return Object.assign({ id: r.id, date: r.date, time: r.time, trainer: r.trainer, selfie: r.selfie || null }, gpsFields(r.gps));
-}
-async function send(body) {
-  const r = await api('submit', Object.assign({ trainer: S.config.trainer.code }, body), 60000);
-  if (!r.ok) throw new Error(r.error || 'Server error');
-  for (const id of r.accepted) await recDel(id);
+function requestBackgroundSend() {
+  // Chrome on Android finishes sending later, even if the app is closed
+  if (!('serviceWorker' in navigator)) return;
+  navigator.serviceWorker.ready.then((reg) => (reg.sync ? reg.sync.register('send') : null)).catch(() => {});
 }
 async function sync(manual) {
-  if (syncing || !S.config) return;
+  if (!S.config) return;
+  if (syncing) { if (manual) showProgress('Sending... ' + syncLeft + ' left'); return; }
   syncing = true;
-  const msg = (t) => { if (manual) $('admin-msg').textContent = t; };
   try {
-    let ready = (await recAll()).filter((r) => r.ready);
-    if (!ready.length) { msg('Nothing waiting to send.'); return; }
-    if (!navigator.onLine) { msg('Offline. Will send when online.'); return; }
-    msg('Sending...');
-    // scans in time order; rows with images go one per request, the rest up to 50 per request
-    const scans = ready.filter((r) => r.kind === 'scan').sort((a, b) => a.ts - b.ts);
-    let group = [];
-    const flush = async () => { if (group.length) { await send({ records: group.map(scanForServer) }); group = []; } };
-    for (const r of scans) {
-      if (r.photo || r.snapshot) { await flush(); await send({ records: [scanForServer(r)] }); }
-      else { group.push(r); if (group.length >= 50) await flush(); }
-    }
-    await flush();
-    // class summaries go only after all of that class's scans are in
-    const left = await recAll();
-    const sessions = left.filter((r) => r.kind === 'session' && r.ready && !left.some((x) => x.kind === 'scan' && x.sessionId === r.id && x.ready));
-    if (sessions.length) await send({ sessions: sessions.map(sessionForServer) });
-    const punches = left.filter((r) => r.kind === 'punch' && r.ready);
-    const plainP = punches.filter((r) => !r.selfie);
-    if (plainP.length) await send({ punches: plainP.map(punchForServer) });
-    for (const p of punches.filter((r) => r.selfie)) await send({ punches: [punchForServer(p)] });
-    msg('All sent.');
+    const n = (await recAll()).filter((r) => r.ready).length;
+    if (!n) { if (manual) showProgress('Nothing waiting to send.'); return; }
+    if (!navigator.onLine) { showProgress(n + ' item' + (n === 1 ? '' : 's') + ' waiting to send. Will send when online.'); requestBackgroundSend(); return; }
+    const left = await SENDER.sendAll(API_URL, (k) => { syncLeft = k; if (k) showProgress('Sending... ' + k + ' left'); });
+    showProgress(left ? left + ' waiting to send.' : (manual ? 'All sent.' : ''));
   } catch (e) {
-    msg('Not sent yet (' + e.message + '). Will retry automatically.');
+    const n = (await recAll()).filter((r) => r.ready).length;
+    showProgress(n + ' waiting to send. Not sent yet (' + e.message + '). Will retry automatically.');
+    requestBackgroundSend();
   } finally {
     syncing = false;
-    updatePending();
+    if (!$('scr-home').classList.contains('hidden')) renderRecentClasses();
   }
 }
 
@@ -738,43 +739,39 @@ document.addEventListener('visibilitychange', async () => {
 /* ---------------- wire up ---------------- */
 $('btn-login').onclick = () => doLogin($('in-trainer').value);
 $('in-trainer').addEventListener('keydown', (e) => { if (e.key === 'Enter') doLogin($('in-trainer').value); });
-$('btn-punch').onclick = doPunch;
-$('btn-resume').onclick = () => { unlockAudio(); say(' '); openScan(); };
+$('btn-mark').onclick = markOwnAttendance;
+$('btn-classphoto').onclick = () => takeClassPhoto();
+$('btn-resume').onclick = resumeClass;
 $('btn-nocard').onclick = openNoCard;
 $('in-search').addEventListener('input', renderSearch);
 $('btn-add-new').onclick = addNew;
 $('btn-finish').onclick = openSummary;
 $('tile-present').onclick = () => showSumList('present');
 $('tile-absent').onclick = () => showSumList('absent');
+$('btn-sum-photo').onclick = () => takeClassPhoto(renderSummary);
 $('btn-sum-back').onclick = () => popLayers(1);
-$('btn-submit').onclick = submitSession;
+$('btn-submit').onclick = () => submitSession(false);
 $('btn-a-sync').onclick = () => sync(true);
-$('btn-a-voice').onclick = () => { unlockAudio(); pickVoice(); say('Testing. Asha Kumari. Rahul Verma.'); };
+$('btn-a-voice').onclick = () => { pickVoice(); say('Testing. Asha Kumari. Rahul Verma.'); };
 $('btn-a-refresh').onclick = () => refreshConfig(false);
-$('btn-a-change').onclick = changeTrainer;
 window.addEventListener('online', () => { sync(false); refreshConfig(true); });
 window.addEventListener('offline', updatePending);
 setInterval(() => sync(false), 60000);
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
 
 (async function init() {
-  // first time the app is opened each day (used as class start when own attendance is not marked)
-  const fo = LS.get('firstOpen');
-  if (!fo || fo.date !== localDate(Date.now())) LS.set('firstOpen', { date: localDate(Date.now()), time: localTime(Date.now()) });
+  try { await SENDER.cleanOld(); } catch (e) { /* ignore */ }
   // each trainer can be sent a personal link ending in ?t=CODE, so nothing has to be typed
   const linkCode = new URLSearchParams(location.search).get('t');
-  if (linkCode) history.replaceState(null, '', location.pathname);
-  if (linkCode && (!S.config || S.config.trainer.code !== linkCode.trim().toUpperCase())) {
-    if (S.config && S.session) { /* keep the open class; ignore link until it is finished */ }
-    else { await doLogin(linkCode); return; }
-  }
+  if (linkCode) history.replaceState({ app: PAGE_TOKEN, depth: 0 }, '', location.pathname);
+  if (linkCode && (!S.config || S.config.trainer.code !== linkCode.trim().toUpperCase()) && !S.session) { await doLogin(linkCode); return; }
   if (!S.config) { show('scr-login'); return; }
-  if (S.session && Date.now() - S.session.startTs > OLD_SESSION_MS) {
-    // class left open from an earlier day: submit what was scanned
-    const s = S.session;
+  if (S.session && !S.session.classStartTs) S.session.classStartTs = S.session.startTs || Date.now(); // class left open in an older version
+  if (S.session && Date.now() - S.session.classStartTs > OLD_SESSION_MS) {
+    // class left open from an earlier day: submit what was scanned (flagged in Summary if no class photo)
     S.marked = new Map();
-    (await recAll()).filter((r) => r.kind === 'scan' && r.sessionId === s.id).forEach((r) => S.marked.set(r.cardBatch + '|' + r.roll, r));
-    await submitSession();
+    (await recAll()).filter((r) => r.kind === 'scan' && r.sessionId === S.session.id).forEach((r) => S.marked.set(r.studentId, r));
+    await submitSession(true);
     return;
   }
   if (S.session) {

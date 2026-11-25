@@ -84,13 +84,13 @@ function qrSvg(text) {
 }
 function visible() {
   const b = $('sel-batch').value;
-  return b ? cards.filter((c) => c.batch === b) : cards;
+  return b ? cards.filter((c) => c.batches.indexOf(b) >= 0) : cards;
 }
 function renderSheet() {
   $('sheet').innerHTML = visible().map((c) =>
     '<div class="card"><div class="qr">' + qrSvg(c.qr) + '</div><div class="txt">' +
-    '<div class="name">' + esc(c.name) + '</div><div class="roll">Roll ' + esc(c.roll) + '</div>' +
-    '<div class="roll">' + esc(c.label) + ' · ' + esc(c.batch) + '</div><div class="org">TNS India Foundation</div></div></div>').join('');
+    '<div class="name">' + esc(c.label) + '</div><div class="roll">' + esc(c.id) + '</div>' +
+    '<div class="roll">' + esc(c.courses.join(', ')) + '</div><div class="org">TNS India Foundation</div></div></div>').join('');
   $('msg').textContent = visible().length + ' cards shown. Print on A4 at 100% scale (no "fit to page").';
 }
 async function load() {
@@ -119,14 +119,14 @@ function showCard(i) {
   idx = (i + list.length) % list.length;
   const c = list[idx];
   $('s-qr').innerHTML = qrSvg(c.qr);
-  $('s-name').textContent = c.name;
-  $('s-meta').textContent = 'Roll ' + c.roll + ' · ' + c.label + ' · ' + c.batch + ' · ' + (idx + 1) + ' of ' + list.length;
+  $('s-name').textContent = c.label;
+  $('s-meta').textContent = c.id + ' · ' + c.courses.join(', ') + ' · ' + (idx + 1) + ' of ' + list.length;
 }
 function showInvalid() {
   const c = visible()[idx] || cards[0];
   if (!c) return;
   const parts = c.qr.split('|');
-  parts[4] = parts[4] === 'AAAAAA' ? 'BBBBBB' : 'AAAAAA'; // wrong check code, like a home-made card
+  parts[3] = parts[3] === 'AAAAAA' ? 'BBBBBB' : 'AAAAAA'; // wrong check code, like a home-made card
   $('s-qr').innerHTML = qrSvg(parts.join('|'));
   $('s-name').textContent = 'Invalid test card';
   $('s-meta').textContent = 'Should give red, low buzz, "card not valid"';
