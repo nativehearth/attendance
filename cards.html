@@ -90,7 +90,7 @@ function renderSheet() {
   $('sheet').innerHTML = visible().map((c) =>
     '<div class="card"><div class="qr">' + qrSvg(c.qr) + '</div><div class="txt">' +
     '<div class="name">' + esc(c.name) + '</div><div class="roll">Roll ' + esc(c.roll) + '</div>' +
-    '<div class="roll">Batch ' + esc(c.batch) + '</div><div class="org">TNS India Foundation</div></div></div>').join('');
+    '<div class="roll">' + esc(c.label) + ' · ' + esc(c.batch) + '</div><div class="org">TNS India Foundation</div></div></div>').join('');
   $('msg').textContent = visible().length + ' cards shown. Print on A4 at 100% scale (no "fit to page").';
 }
 async function load() {
@@ -106,8 +106,8 @@ async function load() {
     cards = r.cards;
     const sel = $('sel-batch');
     const cur = sel.value;
-    sel.innerHTML = '<option value="">All batches</option>' + r.batches.map((b) => '<option>' + esc(b) + '</option>').join('');
-    sel.value = r.batches.includes(cur) ? cur : '';
+    sel.innerHTML = '<option value="">All batches</option>' + r.batches.map((b) => '<option value="' + esc(b.code) + '">' + esc(b.code + ' · ' + b.label) + '</option>').join('');
+    sel.value = r.batches.some((b) => b.code === cur) ? cur : '';
     renderSheet();
   } catch (e) {
     $('msg').textContent = 'Could not reach server: ' + e.message;
@@ -120,7 +120,7 @@ function showCard(i) {
   const c = list[idx];
   $('s-qr').innerHTML = qrSvg(c.qr);
   $('s-name').textContent = c.name;
-  $('s-meta').textContent = 'Roll ' + c.roll + ' · Batch ' + c.batch + ' · ' + (idx + 1) + ' of ' + list.length;
+  $('s-meta').textContent = 'Roll ' + c.roll + ' · ' + c.label + ' · ' + c.batch + ' · ' + (idx + 1) + ' of ' + list.length;
 }
 function showInvalid() {
   const c = visible()[idx] || cards[0];

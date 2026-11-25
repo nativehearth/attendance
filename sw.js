@@ -1,5 +1,5 @@
 // Offline cache for the trainer page. Change CACHE when files change so phones pick up the update.
-const CACHE = 'attendance-v0.1.0';
+const CACHE = 'attendance-v0.2.1';
 const FILES = ['./', 'index.html', 'app.js', 'config.js', 'jsQR.js', 'manifest.json', 'icon-192.png', 'icon-512.png'];
 
 self.addEventListener('install', (e) => {
