@@ -1,7 +1,7 @@
 'use strict';
 /* Student attendance (demo v0.4): trainer page. */
 
-const APP_VERSION = '0.4.0';
+const APP_VERSION = '0.5.0';
 const API_URL = (window.APP_CONFIG || {}).API_URL || '';
 const B32 = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const SAME_CARD_GAP_MS = 2500;   // a card kept in view is ignored until it has been out of view this long
@@ -144,7 +144,7 @@ async function api(action, body = {}, timeoutMs = 30000) {
 function saveConfig(r) {
   const extra = (S.config && S.config.extraRosters) || {}; // lists downloaded for substitute classes
   S.config = { trainer: r.trainer, batches: r.batches, allBatches: r.allBatches, rosters: Object.assign({}, extra, r.rosters), extraRosters: extra,
-    registered: r.registered, cardKey: r.cardKey, at: Date.now() };
+    registered: r.registered, cardKey: r.cardKey, classes: r.classes || [], trainerNames: r.trainerNames || {}, at: Date.now() };
   S.hmacKey = null;
   LS.set('config', S.config);
 }
@@ -218,13 +218,13 @@ async function refreshConfig(quiet) {
   if (!S.config || !navigator.onLine) return;
   try {
     const r = await api('config', { trainer: S.config.trainer.code }, 15000);
-    if (r.ok) { saveConfig(r); if (!quiet) $('admin-msg').textContent = 'Batches updated.'; if (!$('scr-home').classList.contains('hidden')) showHome(); }
+    if (r.ok) { saveConfig(r); if (!quiet) $('admin-msg').textContent = 'Batches updated.'; if (!$('scr-home').classList.contains('hidden')) showHome(false); }
     else if (!quiet) $('admin-msg').textContent = r.error || 'Not accepted';
   } catch (e) { if (!quiet) $('admin-msg').textContent = 'Offline. Using saved batch list.'; }
 }
 
 /* ---------------- home ---------------- */
-async function showHome() {
+async function showHome(toToday = true) {
   show('scr-home');
   const t = S.config.trainer;
   $('home-name').textContent = t.name + ' (' + t.code + ')';
@@ -238,18 +238,75 @@ async function showHome() {
     list.appendChild(btn);
   });
   if (!(S.config.batches || []).length) list.innerHTML = '<p class="small">No batches assigned. Ask admin.</p>';
-  await renderRecentClasses();
+  await renderDays(toToday);
   updatePending();
   updateVoiceWarn();
 }
-async function renderRecentClasses() {
-  const rc = LS.get('recentClasses', []);
-  const waiting = new Set((await recAll()).filter((r) => r.kind === 'session').map((r) => r.id));
-  $('recent-title').classList.toggle('hidden', !rc.length);
-  $('recent-classes').innerHTML = rc.map((c) =>
-    '<div class="rc"><span><b>' + esc(c.label) + '</b><br>' + esc(c.date.slice(8) + '/' + c.date.slice(5, 7)) + ' · ' + esc(c.start.slice(0, 5)) + '</span>' +
-    '<span class="rc-meta">Present ' + c.present + ' · Absent ' + c.absent + '<br>' + (waiting.has(c.id) ? 'Waiting to send' : 'Sent') + '</span></div>').join('');
+/* Day view: last 7 days, today, next 7 days. Timetable from the Batches tab (Days, Time); classes taken from the
+   server (as of the last time online) plus classes on this phone, including those not yet sent. */
+const DAYS_BACK = 7, DAYS_AHEAD = 7;
+const WD = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'];
+const MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+function dayTitle(d, offset) {
+  const w = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][d.getDay()] + ' ' + d.getDate() + ' ' + MON[d.getMonth()];
+  return offset === 0 ? 'Today, ' + w : offset === -1 ? 'Yesterday, ' + w : offset === 1 ? 'Tomorrow, ' + w : w;
 }
+function onDays(b, wd) { return String(b.days || '').split(/[,;\s]+/).map((x) => x.toLowerCase().slice(0, 3)).indexOf(wd) >= 0; }
+async function renderDays(toToday) {
+  const box = $('days');
+  const keepIdx = box.clientWidth ? Math.round(box.scrollLeft / box.clientWidth) : DAYS_BACK;
+  const cfg = S.config || {};
+  const me = cfg.trainer.code;
+  const names = cfg.trainerNames || {};
+  const waiting = new Set((await recAll()).filter((r) => r.kind === 'session').map((r) => r.id));
+  const taken = {};
+  (cfg.classes || []).forEach((c) => { taken[c.id] = c; });
+  LS.get('recentClasses', []).forEach((c) => { if (c.batch) taken[c.id] = Object.assign({ trainer: me }, c, { start: String(c.start).slice(0, 5) }); });
+  const all = Object.values(taken);
+  const now = new Date();
+  let html = '';
+  for (let off = -DAYS_BACK; off <= DAYS_AHEAD; off++) {
+    const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() + off, 12);
+    const date = localDate(d.getTime());
+    const items = [];
+    const done = all.filter((c) => c.date === date);
+    (cfg.batches || []).filter((b) => onDays(b, WD[d.getDay()])).forEach((b) => {
+      const i = done.findIndex((c) => c.batch === b.code);
+      if (i >= 0) { items.push({ c: done[i], b }); done.splice(i, 1); } else items.push({ b, time: b.time || '' });
+    });
+    done.forEach((c) => items.push({ c, b: batchInfo(c.batch) || { code: c.batch, label: c.batch } }));
+    items.sort((x, y) => String(x.c ? x.c.start : x.time).localeCompare(String(y.c ? y.c.start : y.time)));
+    html += '<div class="day" data-date="' + date + '">' + (items.length ? items.map((it) => {
+      const label = '<b>' + esc(it.b.label || it.b.code) + '</b>';
+      if (it.c) {
+        const c = it.c;
+        const who = c.trainer && c.trainer !== me ? 'By ' + esc(names[c.trainer] || c.trainer) + '<br>' : '';
+        const tags = (c.substitute ? ' · Substitute' : '') ;
+        const state = waiting.has(c.id) ? '<br><span class="wait">Waiting to send</span>' : '';
+        return '<div class="cls done"><span class="t">' + esc(c.start) + ' · ' + label + '</span><span class="m">' + who +
+          'Present ' + c.present + ' · Absent ' + c.absent + tags + state + '</span></div>';
+      }
+      const t = esc(it.time || '');
+      if (off < 0) return '<div class="cls cancel"><span class="t">' + t + ' · ' + label + '</span><span class="m">Cancelled</span></div>';
+      if (off === 0) return '<div class="cls"><span class="t">' + t + ' · ' + label + '</span><button class="primary" data-start="' + esc(it.b.code) + '">Start</button></div>';
+      return '<div class="cls"><span class="t">' + t + ' · ' + label + '</span><span class="m">Upcoming</span></div>';
+    }).join('') : '<div class="none">No classes</div>') + '</div>';
+  }
+  box.innerHTML = html;
+  box.querySelectorAll('button[data-start]').forEach((btn) => { btn.onclick = () => openClass(btn.dataset.start); });
+  const idx = toToday ? DAYS_BACK : keepIdx;
+  requestAnimationFrame(() => { box.style.scrollBehavior = 'auto'; box.scrollLeft = idx * box.clientWidth; box.style.scrollBehavior = ''; setDayTitle(); });
+}
+function dayIndex() { const box = $('days'); return box.clientWidth ? Math.round(box.scrollLeft / box.clientWidth) : DAYS_BACK; }
+function setDayTitle() {
+  const i = Math.max(0, Math.min(DAYS_BACK + DAYS_AHEAD, dayIndex()));
+  const now = new Date();
+  $('day-title').textContent = dayTitle(new Date(now.getFullYear(), now.getMonth(), now.getDate() + i - DAYS_BACK, 12), i - DAYS_BACK);
+  $('day-prev').disabled = i === 0; $('day-next').disabled = i === DAYS_BACK + DAYS_AHEAD;
+  const panel = document.querySelectorAll('#days .day')[i];
+  if (panel) $('days').style.height = panel.offsetHeight + 'px';
+}
+function stepDay(n) { const box = $('days'); box.scrollTo({ left: (dayIndex() + n) * box.clientWidth, behavior: 'smooth' }); }
 async function updatePending() {
   if (syncing) return 0;
   try {
@@ -734,8 +791,10 @@ async function submitSession(force) {
     gps: s.gps, gpsEnd: S.lastFix || s.gps, fastScans: s.fastScans, comment: s.comment || '', substitute: !!s.substitute });
   if (photo) await recDel(photo.id);
   const rc = LS.get('recentClasses', []);
-  rc.unshift({ id: s.id, label: labelOf(s.batch), date: s.date, start: localTime(s.classStartTs), present: c.present.length, absent: c.absent.length });
-  LS.set('recentClasses', rc.slice(0, 2));
+  rc.unshift({ id: s.id, batch: s.batch, trainer: s.trainer, label: labelOf(s.batch), date: s.date, start: localTime(s.classStartTs),
+    present: c.present.length, absent: c.absent.length, substitute: !!s.substitute });
+  const cutoff = localDate(Date.now() - 9 * 86400000);
+  LS.set('recentClasses', rc.filter((x) => x.batch && x.date >= cutoff).slice(0, 60));
   LS.del('session');
   S.session = null; S.marked = new Map(); S.recent = [];
   await showHome();
@@ -777,7 +836,7 @@ async function sync(manual) {
     clearTimeout(retryTimer); retryTimer = setTimeout(() => sync(false), delay);
   } finally {
     syncing = false;
-    if (!$('scr-home').classList.contains('hidden')) renderRecentClasses();
+    if (!$('scr-home').classList.contains('hidden')) renderDays(false);
   }
 }
 
@@ -791,6 +850,7 @@ document.addEventListener('visibilitychange', async () => {
     try { if ((await recAll()).some((r) => r.ready)) requestBackgroundSend(); } catch (e) { /* ignore */ }
     return;
   }
+  if (S.config && !S.session && !$('scr-home').classList.contains('hidden')) { renderDays(true); refreshConfig(true); }
   if (S.scanning && S.session) {
     requestWake();
     try { await startCamera(); } catch (e) { banner('red', 'Camera not available: ' + e.message); }
@@ -816,6 +876,11 @@ $('btn-submit').onclick = () => submitSession(false);
 $('btn-a-sync').onclick = () => sync(true);
 $('btn-a-voice').onclick = () => { pickVoice(); say('Testing. Asha Kumari. Rahul Verma.'); };
 $('btn-a-refresh').onclick = () => refreshConfig(false);
+$('day-prev').onclick = () => stepDay(-1);
+$('day-next').onclick = () => stepDay(1);
+let dayScrollT = null;
+$('days').addEventListener('scroll', () => { clearTimeout(dayScrollT); dayScrollT = setTimeout(setDayTitle, 60); });
+window.addEventListener('resize', () => { if (!$('scr-home').classList.contains('hidden')) renderDays(false); });
 $('btn-sub').onclick = openSubstitute;
 $('in-sub').addEventListener('input', renderSub);
 ['dlg-nocard', 'dlg-photo', 'dlg-student', 'dlg-admin', 'dlg-sub'].forEach((id) => {

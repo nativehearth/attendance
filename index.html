@@ -32,6 +32,18 @@
   .batch { text-align:left; display:flex; flex-direction:column; gap:3px; padding:14px 16px; }
   .batch b { font-size:20px; } .batch span { font-size:14px; color:var(--muted); }
 
+  #day-head { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-top:4px; }
+  #day-head button { padding:6px 16px; font-size:22px; line-height:1; }
+  #day-title { font-size:17px; font-weight:700; text-align:center; flex:1; }
+  #days { display:flex; align-items:flex-start; overflow-x:auto; overflow-y:hidden; transition:height .15s; scroll-snap-type:x mandatory; scrollbar-width:none; gap:0; }
+  #days::-webkit-scrollbar { display:none; }
+  .day { flex:0 0 100%; scroll-snap-align:start; display:flex; flex-direction:column; gap:8px; min-height:70px; }
+  .cls { background:#fff; border:1px solid var(--line); border-radius:12px; padding:10px 14px; display:flex; justify-content:space-between; align-items:center; gap:8px; }
+  .cls .t { font-size:15px; } .cls .t b { font-size:16px; } .cls .m { font-size:13px; color:var(--muted); text-align:right; }
+  .cls.cancel { background:#f8fafc; } .cls.cancel .m { color:#b91c1c; }
+  .cls.done .m { color:#166534; } .cls .m.wait { color:#92400e; }
+  .cls button { padding:8px 14px; font-size:15px; }
+  .day .none { color:var(--muted); font-size:14px; padding:14px 4px; }
   .rc { background:#fff; border:1px solid var(--line); border-radius:12px; padding:10px 14px; font-size:15px; display:flex; justify-content:space-between; gap:8px; }
   .rc b { font-size:16px; } .rc .rc-meta { color:var(--muted); font-size:13px; text-align:right; }
   #mark-pane { position:absolute; inset:0; background:#0f172a; display:flex; align-items:center; justify-content:center; padding:24px; }
@@ -127,11 +139,11 @@
 
 <section id="scr-home" class="screen hidden">
   <div id="home-name"></div>
+  <div id="day-head"><button id="day-prev" aria-label="Previous day">‹</button><span id="day-title"></span><button id="day-next" aria-label="Next day">›</button></div>
+  <div id="days"></div>
   <h2>Start class</h2>
   <div id="batch-list"></div>
   <button id="btn-sub">Take another trainer's class</button>
-  <h2 id="recent-title" class="hidden">Last classes</h2>
-  <div id="recent-classes"></div>
   <p id="pending-line" class="small hidden"></p>
   <p id="voice-warn" class="warn hidden">No offline voice on this phone. Names will not be spoken without internet.</p>
 </section>
@@ -218,9 +230,9 @@
   </div>
 </div>
 
-<script src="config.js?v=0.4.0"></script>
-<script src="jsQR.js?v=0.4.0"></script>
-<script src="sender.js?v=0.4.0"></script>
-<script src="app.js?v=0.4.0"></script>
+<script src="config.js?v=0.5.0"></script>
+<script src="jsQR.js?v=0.5.0"></script>
+<script src="sender.js?v=0.5.0"></script>
+<script src="app.js?v=0.5.0"></script>
 </body>
 </html>

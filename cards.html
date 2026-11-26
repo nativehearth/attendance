@@ -75,6 +75,12 @@ const $ = (id) => document.getElementById(id);
 let cards = [];
 let idx = 0;
 
+// "SJBIT - DS", "SJBIT - FS" -> "SJBIT · DS, FS" (college once)
+function courseLine(c) {
+  const parts = c.courses.map((x) => String(x).split(' - '));
+  if (parts.length > 1 && parts.every((p) => p.length === 2 && p[0] === parts[0][0])) return parts[0][0] + ' · ' + parts.map((p) => p[1]).join(', ');
+  return c.courses.join(', ');
+}
 function esc(s) { return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
 function qrSvg(text) {
   const q = qrcode(0, 'M');
@@ -90,7 +96,7 @@ function renderSheet() {
   $('sheet').innerHTML = visible().map((c) =>
     '<div class="card"><div class="qr">' + qrSvg(c.qr) + '</div><div class="txt">' +
     '<div class="name">' + esc(c.label) + '</div><div class="roll">' + esc(c.id) + (c.cardNo > 1 ? ' · card ' + c.cardNo : '') + '</div>' +
-    '<div class="roll">' + esc(c.courses.join(', ')) + '</div><div class="org">TNS India Foundation</div></div></div>').join('');
+    '<div class="roll">' + esc(courseLine(c)) + '</div><div class="org">TNS India Foundation</div></div></div>').join('');
   $('msg').textContent = visible().length + ' cards shown. Print on A4 at 100% scale (no "fit to page").';
 }
 async function load() {
@@ -120,7 +126,7 @@ function showCard(i) {
   const c = list[idx];
   $('s-qr').innerHTML = qrSvg(c.qr);
   $('s-name').textContent = c.label;
-  $('s-meta').textContent = c.id + ' · ' + c.courses.join(', ') + ' · ' + (idx + 1) + ' of ' + list.length;
+  $('s-meta').textContent = c.id + ' · ' + courseLine(c) + ' · ' + (idx + 1) + ' of ' + list.length;
 }
 function showInvalid() {
   const c = visible()[idx] || cards[0];
