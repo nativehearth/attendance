@@ -1,5 +1,5 @@
 // Offline cache for the trainer page. VERSION must match the ?v= in index.html.
-const VERSION = '0.5.0';
+const VERSION = '0.6.0';
 const CACHE = 'attendance-v' + VERSION;
 const FILES = ['./', 'index.html', 'manifest.json', 'icon-192.png', 'icon-512.png',
   'config.js?v=' + VERSION, 'jsQR.js?v=' + VERSION, 'sender.js?v=' + VERSION, 'app.js?v=' + VERSION];

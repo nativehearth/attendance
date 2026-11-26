@@ -32,18 +32,31 @@
   .batch { text-align:left; display:flex; flex-direction:column; gap:3px; padding:14px 16px; }
   .batch b { font-size:20px; } .batch span { font-size:14px; color:var(--muted); }
 
-  #day-head { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-top:4px; }
-  #day-head button { padding:6px 16px; font-size:22px; line-height:1; }
-  #day-title { font-size:17px; font-weight:700; text-align:center; flex:1; }
-  #days { display:flex; align-items:flex-start; overflow-x:auto; overflow-y:hidden; transition:height .15s; scroll-snap-type:x mandatory; scrollbar-width:none; gap:0; }
-  #days::-webkit-scrollbar { display:none; }
-  .day { flex:0 0 100%; scroll-snap-align:start; display:flex; flex-direction:column; gap:8px; min-height:70px; }
-  .cls { background:#fff; border:1px solid var(--line); border-radius:12px; padding:10px 14px; display:flex; justify-content:space-between; align-items:center; gap:8px; }
-  .cls .t { font-size:15px; } .cls .t b { font-size:16px; } .cls .m { font-size:13px; color:var(--muted); text-align:right; }
-  .cls.cancel { background:#f8fafc; } .cls.cancel .m { color:#b91c1c; }
-  .cls.done .m { color:#166534; } .cls .m.wait { color:#92400e; }
-  .cls button { padding:8px 14px; font-size:15px; }
-  .day .none { color:var(--muted); font-size:14px; padding:14px 4px; }
+  .tabs { display:flex; gap:6px; } .tabs button { flex:1; padding:9px; font-size:16px; }
+  .tabs button.on { background:#dbeafe; border-color:#93c5fd; color:#1e3a8a; font-weight:600; }
+  #week-head { display:flex; align-items:center; justify-content:space-between; gap:8px; }
+  #week-head button { padding:6px 16px; font-size:22px; line-height:1; }
+  #wk-title { font-size:16px; font-weight:700; text-align:center; flex:1; }
+  #week { width:100%; border-collapse:collapse; background:#fff; border:1px solid var(--line); border-radius:12px; font-size:14px; }
+  #week td { padding:7px 6px; border-bottom:1px solid var(--line); vertical-align:top; line-height:1.55; }
+  #week tr:last-child td { border-bottom:none; }
+  #week td.d { white-space:nowrap; color:var(--muted); width:58px; } #week td.s { text-align:right; white-space:nowrap; }
+  #week tr.today td { background:#eff6ff; } #week tr.today td.d { color:#1e3a8a; font-weight:600; }
+  #week .none { color:#94a3b8; }
+  #week button { padding:3px 12px; font-size:14px; }
+  #pane-classes, #pane-students { display:flex; flex-direction:column; gap:10px; } #pane-classes.hidden, #pane-students.hidden { display:none; }
+  #pane-classes h2 { margin:8px 0 0; } #btn-sub { width:100%; }
+  .ok { color:#166534; } .wa { color:#a16207; } .bad { color:#b91c1c; } .mu { color:var(--muted); }
+  .chip { padding:6px 12px; font-size:14px; width:auto; align-self:flex-start; } .chip.on { background:#dbeafe; border-color:#93c5fd; color:#1e3a8a; }
+  #stu-list h3 { font-size:15px; margin:12px 0 4px; }
+  .stu { width:100%; border-collapse:collapse; background:#fff; border:1px solid var(--line); border-radius:12px; font-size:14px; }
+  .stu td, .stu th { padding:7px 8px; border-bottom:1px solid var(--line); text-align:left; } .stu th { font-weight:400; color:var(--muted); font-size:13px; }
+  .stu td.n { text-align:right; } .stu th.n { text-align:right; } .stu tr.tap td:first-child { color:#1d4ed8; }
+  .stu small { color:var(--muted); }
+  #st-hist .hh { font-size:14px; font-weight:600; margin:10px 0 4px; }
+  #st-hist .mk { display:flex; flex-wrap:wrap; gap:3px; }
+  #st-hist .mk span { width:22px; text-align:center; border-radius:4px; font-size:13px; padding:2px 0; }
+  #st-hist .mk .P { background:#dcfce7; color:#166534; } #st-hist .mk .A { background:#fee2e2; color:#991b1b; }
   .rc { background:#fff; border:1px solid var(--line); border-radius:12px; padding:10px 14px; font-size:15px; display:flex; justify-content:space-between; gap:8px; }
   .rc b { font-size:16px; } .rc .rc-meta { color:var(--muted); font-size:13px; text-align:right; }
   #mark-pane { position:absolute; inset:0; background:#0f172a; display:flex; align-items:center; justify-content:center; padding:24px; }
@@ -139,11 +152,20 @@
 
 <section id="scr-home" class="screen hidden">
   <div id="home-name"></div>
-  <div id="day-head"><button id="day-prev" aria-label="Previous day">‹</button><span id="day-title"></span><button id="day-next" aria-label="Next day">›</button></div>
-  <div id="days"></div>
-  <h2>Start class</h2>
-  <div id="batch-list"></div>
-  <button id="btn-sub">Take another trainer's class</button>
+  <div class="tabs"><button id="tab-classes" class="on">Classes</button><button id="tab-students">Students</button></div>
+  <div id="pane-classes">
+    <div id="week-head"><button id="wk-prev" aria-label="Previous week">‹</button><span id="wk-title"></span><button id="wk-next" aria-label="Next week">›</button></div>
+    <table id="week"></table>
+    <h2>Start class</h2>
+    <div id="batch-list"></div>
+    <button id="btn-sub">Take another trainer's class</button>
+  </div>
+  <div id="pane-students" class="hidden">
+    <input id="in-stu" placeholder="Type a name or ID" autocomplete="off" spellcheck="false">
+    <button id="btn-flagfirst" class="chip">Flagged first</button>
+    <div id="stu-list"></div>
+    <p id="stu-asof" class="small"></p>
+  </div>
   <p id="pending-line" class="small hidden"></p>
   <p id="voice-warn" class="warn hidden">No offline voice on this phone. Names will not be spoken without internet.</p>
 </section>
@@ -200,14 +222,14 @@
   </div>
 </div>
 
-<div id="dlg-student" class="dialog hidden">
+<div id="dlg-student" class="dialog full hidden">
   <div class="dlg-body">
+    <button id="btn-st-back" class="chip">‹ Back</button>
     <b id="st-title"></b>
     <p id="st-msg" class="small"></p>
-    <table id="st-table" class="hidden"><thead><tr><th>Course</th><th>Held</th><th>Present</th><th>Absent</th><th>Absent (%)</th><th>Rating</th></tr></thead><tbody></tbody></table>
+    <table id="st-table" class="hidden"><thead><tr><th>Course</th><th>Held</th><th>Abs</th><th>Abs %</th><th>Attend.</th></tr></thead><tbody></tbody></table>
     <p id="st-flag" class="warn hidden"></p>
-    <p id="st-recent-title" class="small hidden"></p>
-    <div id="st-recent" class="recent-grid"></div>
+    <div id="st-hist"></div>
   </div>
 </div>
 
@@ -230,9 +252,9 @@
   </div>
 </div>
 
-<script src="config.js?v=0.5.0"></script>
-<script src="jsQR.js?v=0.5.0"></script>
-<script src="sender.js?v=0.5.0"></script>
-<script src="app.js?v=0.5.0"></script>
+<script src="config.js?v=0.6.0"></script>
+<script src="jsQR.js?v=0.6.0"></script>
+<script src="sender.js?v=0.6.0"></script>
+<script src="app.js?v=0.6.0"></script>
 </body>
 </html>

@@ -1,7 +1,7 @@
 'use strict';
 /* Student attendance (demo v0.4): trainer page. */
 
-const APP_VERSION = '0.5.0';
+const APP_VERSION = '0.6.0';
 const API_URL = (window.APP_CONFIG || {}).API_URL || '';
 const B32 = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const SAME_CARD_GAP_MS = 2500;   // a card kept in view is ignored until it has been out of view this long
@@ -59,6 +59,7 @@ const S = {
   lastCode: '', lastCodeAt: 0,
   wake: null, hmacKey: null, registered: null,
   ignorePop: 0, watchId: null, lastFix: null,
+  week: 0, tab: 'classes', flagFirst: false,
 };
 
 /* ---------------- helpers ---------------- */
@@ -144,7 +145,7 @@ async function api(action, body = {}, timeoutMs = 30000) {
 function saveConfig(r) {
   const extra = (S.config && S.config.extraRosters) || {}; // lists downloaded for substitute classes
   S.config = { trainer: r.trainer, batches: r.batches, allBatches: r.allBatches, rosters: Object.assign({}, extra, r.rosters), extraRosters: extra,
-    registered: r.registered, cardKey: r.cardKey, classes: r.classes || [], trainerNames: r.trainerNames || {}, at: Date.now() };
+    registered: r.registered, cardKey: r.cardKey, classes: r.classes || [], trainerNames: r.trainerNames || {}, register: r.register || {}, at: Date.now() };
   S.hmacKey = null;
   LS.set('config', S.config);
 }
@@ -234,27 +235,34 @@ async function showHome(toToday = true) {
     const btn = document.createElement('button');
     btn.className = 'batch';
     btn.innerHTML = '<b>' + esc(b.label) + '</b><span>' + esc(b.code) + ' · ' + esc(b.course) + '</span>';
-    btn.onclick = () => openClass(b.code);
+    btn.onclick = () => startFromList(b.code);
     list.appendChild(btn);
   });
   if (!(S.config.batches || []).length) list.innerHTML = '<p class="small">No batches assigned. Ask admin.</p>';
-  await renderDays(toToday);
+  if (toToday) { S.week = 0; }
+  await renderWeek();
+  if (S.tab === 'students') renderStudents();
   updatePending();
   updateVoiceWarn();
 }
-/* Day view: last 7 days, today, next 7 days. Timetable from the Batches tab (Days, Time); classes taken from the
-   server (as of the last time online) plus classes on this phone, including those not yet sent. */
-const DAYS_BACK = 7, DAYS_AHEAD = 7;
+/* Classes tab: one calendar week (Mon to Sun) per screen, 2 weeks back and 2 ahead. Timetable from the Batches tab (Days,
+   Time); classes taken come from the server (as of the last time online) plus classes on this phone not yet sent. */
+const WEEKS_BACK = 2, WEEKS_AHEAD = 2;
 const WD = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'];
+const WDN = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-function dayTitle(d, offset) {
-  const w = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][d.getDay()] + ' ' + d.getDate() + ' ' + MON[d.getMonth()];
-  return offset === 0 ? 'Today, ' + w : offset === -1 ? 'Yesterday, ' + w : offset === 1 ? 'Tomorrow, ' + w : w;
-}
+const dm = (d) => d.getDate() + ' ' + MON[d.getMonth()];
+const dmStr = (s) => (s ? Number(s.slice(8)) + ' ' + MON[Number(s.slice(5, 7)) - 1] : '');
+const shortLabel = (l) => String(l || '').replace(/\s+-\s+/, '-');
+const initials = (n) => String(n || '').replace(/^(Prof|Dr|Mr|Ms|Mrs)\.?\s+/i, '').split(/\s+/)[0];
 function onDays(b, wd) { return String(b.days || '').split(/[,;\s]+/).map((x) => x.toLowerCase().slice(0, 3)).indexOf(wd) >= 0; }
-async function renderDays(toToday) {
-  const box = $('days');
-  const keepIdx = box.clientWidth ? Math.round(box.scrollLeft / box.clientWidth) : DAYS_BACK;
+function scheduledToday(code) { const b = batchInfo(code); return !b || !b.days || onDays(b, WD[new Date().getDay()]); }
+function startFromList(code) {
+  if (!scheduledToday(code) && !confirm(labelOf(code) + ' is not scheduled today. Start anyway?')) return;
+  openClass(code);
+}
+function absClass(present, size) { const p = size ? present / size * 100 : 0; return p > 90 ? 'ok' : (p >= 70 ? 'wa' : 'bad'); }
+async function renderWeek() {
   const cfg = S.config || {};
   const me = cfg.trainer.code;
   const names = cfg.trainerNames || {};
@@ -264,49 +272,74 @@ async function renderDays(toToday) {
   LS.get('recentClasses', []).forEach((c) => { if (c.batch) taken[c.id] = Object.assign({ trainer: me }, c, { start: String(c.start).slice(0, 5) }); });
   const all = Object.values(taken);
   const now = new Date();
+  const todayStr = localDate(now.getTime());
+  const monday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - ((now.getDay() + 6) % 7) + 7 * S.week, 12);
+  const sunday = new Date(monday.getFullYear(), monday.getMonth(), monday.getDate() + 6, 12);
+  $('wk-title').textContent = dm(monday) + ' to ' + dm(sunday) + (S.week === 0 ? ' · this week' : '');
+  $('wk-prev').disabled = S.week <= -WEEKS_BACK; $('wk-next').disabled = S.week >= WEEKS_AHEAD;
   let html = '';
-  for (let off = -DAYS_BACK; off <= DAYS_AHEAD; off++) {
-    const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() + off, 12);
+  for (let i = 0; i < 7; i++) {
+    const d = new Date(monday.getFullYear(), monday.getMonth(), monday.getDate() + i, 12);
     const date = localDate(d.getTime());
-    const items = [];
+    const when = date < todayStr ? -1 : (date === todayStr ? 0 : 1);
     const done = all.filter((c) => c.date === date);
+    const items = [];
     (cfg.batches || []).filter((b) => onDays(b, WD[d.getDay()])).forEach((b) => {
-      const i = done.findIndex((c) => c.batch === b.code);
-      if (i >= 0) { items.push({ c: done[i], b }); done.splice(i, 1); } else items.push({ b, time: b.time || '' });
+      const k = done.findIndex((c) => c.batch === b.code);
+      if (k >= 0) { items.push({ c: done[k], b }); done.splice(k, 1); } else items.push({ b, time: b.time || '' });
     });
     done.forEach((c) => items.push({ c, b: batchInfo(c.batch) || { code: c.batch, label: c.batch } }));
     items.sort((x, y) => String(x.c ? x.c.start : x.time).localeCompare(String(y.c ? y.c.start : y.time)));
-    html += '<div class="day" data-date="' + date + '">' + (items.length ? items.map((it) => {
-      const label = '<b>' + esc(it.b.label || it.b.code) + '</b>';
+    const left = [], right = [];
+    items.forEach((it) => {
+      left.push(esc((it.c ? it.c.start : it.time) || '') + ' ' + esc(shortLabel(it.b.label || it.b.code)));
       if (it.c) {
-        const c = it.c;
-        const who = c.trainer && c.trainer !== me ? 'By ' + esc(names[c.trainer] || c.trainer) + '<br>' : '';
-        const tags = (c.substitute ? ' · Substitute' : '') ;
-        const state = waiting.has(c.id) ? '<br><span class="wait">Waiting to send</span>' : '';
-        return '<div class="cls done"><span class="t">' + esc(c.start) + ' · ' + label + '</span><span class="m">' + who +
-          'Present ' + c.present + ' · Absent ' + c.absent + tags + state + '</span></div>';
-      }
-      const t = esc(it.time || '');
-      if (off < 0) return '<div class="cls cancel"><span class="t">' + t + ' · ' + label + '</span><span class="m">Cancelled</span></div>';
-      if (off === 0) return '<div class="cls"><span class="t">' + t + ' · ' + label + '</span><button class="primary" data-start="' + esc(it.b.code) + '">Start</button></div>';
-      return '<div class="cls"><span class="t">' + t + ' · ' + label + '</span><span class="m">Upcoming</span></div>';
-    }).join('') : '<div class="none">No classes</div>') + '</div>';
+        const c = it.c, size = Number(c.present) + Number(c.absent);
+        const extra = (c.trainer && c.trainer !== me ? ' · ' + esc(initials(names[c.trainer] || c.trainer)) : '') +
+          (c.substitute ? ' · sub' : '') + (waiting.has(c.id) ? ' · <span class="wa">waiting</span>' : '');
+        right.push('<span class="' + absClass(Number(c.present), size) + '">' + size + ' · Abs ' + c.absent + '</span>' + extra);
+      } else if (when < 0) right.push('<span class="bad">Cancelled</span>');
+      else if (when === 0) right.push('<button class="primary" data-start="' + esc(it.b.code) + '">Start</button>');
+      else right.push('<span class="mu">/' + roster(it.b.code).length + '</span>');
+    });
+    html += '<tr' + (when === 0 ? ' class="today"' : '') + '><td class="d">' + WDN[d.getDay()] + ' ' + d.getDate() + '</td>' +
+      (items.length ? '<td>' + left.join('<br>') + '</td><td class="s">' + right.join('<br>') + '</td>' : '<td class="none" colspan="2">No class</td>') + '</tr>';
   }
-  box.innerHTML = html;
-  box.querySelectorAll('button[data-start]').forEach((btn) => { btn.onclick = () => openClass(btn.dataset.start); });
-  const idx = toToday ? DAYS_BACK : keepIdx;
-  requestAnimationFrame(() => { box.style.scrollBehavior = 'auto'; box.scrollLeft = idx * box.clientWidth; box.style.scrollBehavior = ''; setDayTitle(); });
+  $('week').innerHTML = html;
+  $('week').querySelectorAll('button[data-start]').forEach((btn) => { btn.onclick = () => openClass(btn.dataset.start); });
 }
-function dayIndex() { const box = $('days'); return box.clientWidth ? Math.round(box.scrollLeft / box.clientWidth) : DAYS_BACK; }
-function setDayTitle() {
-  const i = Math.max(0, Math.min(DAYS_BACK + DAYS_AHEAD, dayIndex()));
-  const now = new Date();
-  $('day-title').textContent = dayTitle(new Date(now.getFullYear(), now.getMonth(), now.getDate() + i - DAYS_BACK, 12), i - DAYS_BACK);
-  $('day-prev').disabled = i === 0; $('day-next').disabled = i === DAYS_BACK + DAYS_AHEAD;
-  const panel = document.querySelectorAll('#days .day')[i];
-  if (panel) $('days').style.height = panel.offsetHeight + 'px';
+function stepWeek(n) { S.week = Math.max(-WEEKS_BACK, Math.min(WEEKS_AHEAD, S.week + n)); renderWeek(); }
+
+/* Students tab: every student of this trainer's batches, by college and course; figures as of the last time online */
+const flagged = (c) => !!(c && (c.flag || c.rating === 'Poor'));
+function showTab(which) {
+  S.tab = which;
+  $('tab-classes').classList.toggle('on', which === 'classes'); $('tab-students').classList.toggle('on', which === 'students');
+  $('pane-classes').classList.toggle('hidden', which !== 'classes'); $('pane-students').classList.toggle('hidden', which !== 'students');
+  if (which === 'students') renderStudents();
 }
-function stepDay(n) { const box = $('days'); box.scrollTo({ left: (dayIndex() + n) * box.clientWidth, behavior: 'smooth' }); }
+function renderStudents() {
+  const cfg = S.config || {};
+  const reg = cfg.register || {};
+  const q = $('in-stu').value.trim().toLowerCase();
+  $('btn-flagfirst').classList.toggle('on', !!S.flagFirst);
+  const batches = (cfg.batches || []).slice().sort((a, b) => (a.college + a.label).localeCompare(b.college + b.label));
+  let html = '';
+  batches.forEach((b) => {
+    let rows = roster(b.code).map((s) => ({ s, c: ((reg[s.id] || {}).courses || []).find((x) => x.batch === b.code) }))
+      .filter((x) => !q || x.s.label.toLowerCase().includes(q) || x.s.id.toLowerCase().includes(q));
+    if (S.flagFirst) rows = rows.filter((x) => flagged(x.c)).concat(rows.filter((x) => !flagged(x.c)));
+    if (!rows.length) return;
+    html += '<h3>' + esc(b.label) + '</h3><table class="stu"><tr><th>Name</th><th class="n">Absence %</th><th class="n">Attend.</th></tr>' +
+      rows.map((x) => '<tr class="tap" data-id="' + esc(x.s.id) + '" data-name="' + esc(x.s.label) + '"><td>' + esc(x.s.label) + '<br><small>' + esc(x.s.id) +
+        '</small></td><td class="n">' + (x.c && x.c.held ? x.c.absentPct : '') + '</td><td class="n ' + attClass(x.c && x.c.rating) + '">' +
+        esc((x.c && x.c.rating) || '') + (flagged(x.c) && x.c.flag ? ' !' : '') + '</td></tr>').join('') + '</table>';
+  });
+  $('stu-list').innerHTML = html || '<p class="small">No students found.</p>';
+  $('stu-list').querySelectorAll('tr.tap').forEach((tr) => { tr.onclick = () => openStudent(tr.dataset.id, tr.dataset.name); });
+  $('stu-asof').textContent = cfg.at ? 'Figures as of ' + dmStr(localDate(cfg.at)) + ', ' + localTime(cfg.at).slice(0, 5) + ' (classes received by then).' : '';
+}
+function attClass(r) { return r === 'High' ? 'ok' : (r === 'Med' ? 'wa' : (r === 'Poor' ? 'bad' : '')); }
 async function updatePending() {
   if (syncing) return 0;
   try {
@@ -675,33 +708,35 @@ function photoForManual(t, layersToClose, after) {
 }
 
 /* ---------------- student record (needs internet) ---------------- */
+function renderStudentRecord(rec) {
+  const cs = rec.courses || [];
+  const short = (c) => String(c.course).split(' - ').pop();
+  $('st-table').querySelector('tbody').innerHTML = cs.map((c) => '<tr><td>' + esc(short(c)) + '</td><td>' + c.held + '</td><td>' + c.absent +
+    '</td><td>' + (c.held ? c.absentPct : '') + '</td><td class="' + attClass(c.rating) + '">' + esc(c.rating || '') + '</td></tr>').join('');
+  $('st-table').classList.toggle('hidden', !cs.length);
+  const flags = cs.filter((c) => c.flag).map((c) => short(c) + ': ' + c.flag);
+  $('st-flag').textContent = flags.join(' · ');
+  $('st-flag').classList.toggle('hidden', !flags.length);
+  $('st-hist').innerHTML = cs.filter((c) => c.marks).map((c) => '<div class="hh">' + esc(short(c)) + ' (' + esc(dmStr(c.from)) + ' to ' + esc(dmStr(c.to)) + ')</div>' +
+    '<div class="mk">' + c.marks.split('').map((m) => '<span class="' + m + '">' + m + '</span>').join('') + '</div>').join('');
+}
 async function openStudent(id, name) {
   $('st-title').textContent = name + ' · ' + id;
-  $('st-table').classList.add('hidden');
-  $('st-flag').classList.add('hidden'); $('st-recent-title').classList.add('hidden'); $('st-recent').innerHTML = '';
-  $('st-msg').textContent = navigator.onLine ? 'Loading...' : 'Needs internet to show the full record.';
+  $('st-table').classList.add('hidden'); $('st-flag').classList.add('hidden'); $('st-hist').innerHTML = '';
   $('dlg-student').classList.remove('hidden');
   const wasPaused = S.paused;
   S.paused = true;
   pushLayer('student', () => { $('dlg-student').classList.add('hidden'); S.paused = wasPaused; });
-  if (!navigator.onLine) return;
+  const cached = ((S.config || {}).register || {})[id];
+  const asOf = () => 'Classes received by ' + dmStr(localDate(S.config.at)) + ', ' + localTime(S.config.at).slice(0, 5) + '. Old on the left, newest on the right.';
+  if (cached) { renderStudentRecord(cached); $('st-msg').textContent = cached.college + ' · ' + asOf(); return; }
+  if (!navigator.onLine) { $('st-msg').textContent = 'Needs internet once to show this student (not in your batches).'; return; }
+  $('st-msg').textContent = 'Loading...';
   try {
-    const batch = S.session ? S.session.batch : '';
-    const r = await api('student', { trainer: S.config.trainer.code, studentId: id, batch }, 20000);
+    const r = await api('student', { trainer: S.config.trainer.code, studentId: id }, 20000);
     if (!r.ok) { $('st-msg').textContent = r.error || 'Not available'; return; }
-    const row = (c, cls) => '<tr' + (cls ? ' class="' + cls + '"' : '') + '><td>' + esc(c.course) + '</td><td>' + c.held + '</td><td>' + c.attended +
-      '</td><td>' + c.absent + '</td><td>' + c.absentPct + '</td><td class="r-' + esc(c.rating) + '">' + esc(c.rating) + '</td></tr>';
-    $('st-table').querySelector('tbody').innerHTML = r.courses.map((c) => row(c)).join('') +
-      row(Object.assign({ course: 'All courses' }, r.total), 'total');
-    $('st-table').classList.remove('hidden');
-    const flags = r.courses.filter((c) => c.flag).map((c) => c.course + ': ' + c.flag);
-    $('st-flag').textContent = flags.join(' · ');
-    $('st-flag').classList.toggle('hidden', !flags.length);
-    const rec = r.recent || [];
-    $('st-recent-title').textContent = rec.length ? 'Last ' + rec.length + ' classes of ' + labelOf(batch) + ' (newest first)' : '';
-    $('st-recent-title').classList.toggle('hidden', !rec.length);
-    $('st-recent').innerHTML = rec.map((x) => '<span class="pa ' + x.status + '">' + esc(x.date.slice(8) + '/' + x.date.slice(5, 7)) + ' ' + x.status + '</span>').join('');
-    $('st-msg').textContent = r.student.college + ' · classes submitted so far (this class counts after it is sent)';
+    renderStudentRecord(r);
+    $('st-msg').textContent = r.student.college + ' · classes received so far. Old on the left, newest on the right.';
   } catch (e) { $('st-msg').textContent = 'Could not load (' + e.message + ').'; }
 }
 
@@ -836,7 +871,7 @@ async function sync(manual) {
     clearTimeout(retryTimer); retryTimer = setTimeout(() => sync(false), delay);
   } finally {
     syncing = false;
-    if (!$('scr-home').classList.contains('hidden')) renderDays(false);
+    if (!$('scr-home').classList.contains('hidden')) renderWeek();
   }
 }
 
@@ -850,7 +885,7 @@ document.addEventListener('visibilitychange', async () => {
     try { if ((await recAll()).some((r) => r.ready)) requestBackgroundSend(); } catch (e) { /* ignore */ }
     return;
   }
-  if (S.config && !S.session && !$('scr-home').classList.contains('hidden')) { renderDays(true); refreshConfig(true); }
+  if (S.config && !S.session && !$('scr-home').classList.contains('hidden')) { renderWeek(); refreshConfig(true); }
   if (S.scanning && S.session) {
     requestWake();
     try { await startCamera(); } catch (e) { banner('red', 'Camera not available: ' + e.message); }
@@ -876,11 +911,13 @@ $('btn-submit').onclick = () => submitSession(false);
 $('btn-a-sync').onclick = () => sync(true);
 $('btn-a-voice').onclick = () => { pickVoice(); say('Testing. Asha Kumari. Rahul Verma.'); };
 $('btn-a-refresh').onclick = () => refreshConfig(false);
-$('day-prev').onclick = () => stepDay(-1);
-$('day-next').onclick = () => stepDay(1);
-let dayScrollT = null;
-$('days').addEventListener('scroll', () => { clearTimeout(dayScrollT); dayScrollT = setTimeout(setDayTitle, 60); });
-window.addEventListener('resize', () => { if (!$('scr-home').classList.contains('hidden')) renderDays(false); });
+$('btn-st-back').onclick = () => history.back();
+$('wk-prev').onclick = () => stepWeek(-1);
+$('wk-next').onclick = () => stepWeek(1);
+$('tab-classes').onclick = () => showTab('classes');
+$('tab-students').onclick = () => showTab('students');
+$('in-stu').oninput = () => renderStudents();
+$('btn-flagfirst').onclick = () => { S.flagFirst = !S.flagFirst; renderStudents(); };
 $('btn-sub').onclick = openSubstitute;
 $('in-sub').addEventListener('input', renderSub);
 ['dlg-nocard', 'dlg-photo', 'dlg-student', 'dlg-admin', 'dlg-sub'].forEach((id) => {
