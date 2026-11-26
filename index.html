@@ -44,6 +44,14 @@
   #st-table th:first-child, #st-table td:first-child { text-align:left; }
   #st-table tr.total td { font-weight:700; }
   .list li .name.link { color:#1d4ed8; }
+  #fatal { position:fixed; inset:0; z-index:50; background:#fff; padding:24px; display:flex; flex-direction:column; gap:12px; justify-content:center; }
+  #btn-sub { background:none; border:1px dashed #94a3b8; color:#334155; font-size:15px; }
+  textarea { font-size:16px; padding:10px; border:1px solid #cbd5e1; border-radius:10px; width:100%; font-family:inherit; }
+  .recent-grid { display:flex; flex-wrap:wrap; gap:6px; }
+  .pa { padding:4px 7px; border-radius:6px; font-size:13px; }
+  .pa.P { background:#dcfce7; color:#14532d; } .pa.A { background:#fee2e2; color:#7f1d1d; }
+  .list li .mark { padding:6px 10px; font-size:14px; }
+  .r-High { color:#15803d; font-weight:700; } .r-Average { color:#b45309; font-weight:700; } .r-Poor { color:#b91c1c; font-weight:700; }
   #scr-resume { justify-content:center; }
   #btn-resume { font-size:22px; padding:28px 16px; }
 
@@ -91,6 +99,24 @@
 </style>
 </head>
 <body>
+<div id="fatal" class="hidden"><b>The app could not start.</b><p>Tap Repair. Saved attendance is kept. If it keeps happening, tell the admin.</p>
+  <button id="btn-repair" class="primary">Repair and reload</button><p class="small" id="fatal-detail"></p></div>
+<script>
+  // shows a message instead of a blank screen if the app fails to start (saved data is kept by Repair)
+  window.__fatal = function (msg) {
+    if (window.__appStarted) return;
+    var d = document.getElementById('fatal'); if (!d) return;
+    d.classList.remove('hidden'); document.getElementById('fatal-detail').textContent = msg || '';
+  };
+  window.addEventListener('error', function (e) { window.__fatal(e.message); });
+  window.addEventListener('unhandledrejection', function (e) { window.__fatal(e.reason && e.reason.message ? e.reason.message : String(e.reason)); });
+  setTimeout(function () { if (!window.__appStarted) window.__fatal('Took too long to start'); }, 15000);
+  document.getElementById('btn-repair').onclick = async function () {
+    try { if (window.caches) { var k = await caches.keys(); for (var i = 0; i < k.length; i++) await caches.delete(k[i]); } } catch (e) {}
+    try { if (navigator.serviceWorker) { var r = await navigator.serviceWorker.getRegistrations(); for (var j = 0; j < r.length; j++) await r[j].unregister(); } } catch (e) {}
+    location.reload();
+  };
+</script>
 
 <section id="scr-login" class="screen hidden">
   <h1>Student attendance</h1>
@@ -103,6 +129,7 @@
   <div id="home-name"></div>
   <h2>Start class</h2>
   <div id="batch-list"></div>
+  <button id="btn-sub">Take another trainer's class</button>
   <h2 id="recent-title" class="hidden">Last classes</h2>
   <div id="recent-classes"></div>
   <p id="pending-line" class="small hidden"></p>
@@ -139,6 +166,7 @@
   <div class="dlg-body">
     <p id="photo-title"></p>
     <video id="video-photo" playsinline muted autoplay></video>
+    <textarea id="photo-comment" class="hidden" rows="2" placeholder="Comment (optional): holiday, exam, only 5 came..."></textarea>
     <button id="btn-photo-take" class="primary">Take photo</button>
   </div>
 </div>
@@ -164,7 +192,19 @@
   <div class="dlg-body">
     <b id="st-title"></b>
     <p id="st-msg" class="small"></p>
-    <table id="st-table" class="hidden"><thead><tr><th>Course</th><th>Held</th><th>Attended</th><th>Absent</th><th>Absent (%)</th></tr></thead><tbody></tbody></table>
+    <table id="st-table" class="hidden"><thead><tr><th>Course</th><th>Held</th><th>Present</th><th>Absent</th><th>Absent (%)</th><th>Rating</th></tr></thead><tbody></tbody></table>
+    <p id="st-flag" class="warn hidden"></p>
+    <p id="st-recent-title" class="small hidden"></p>
+    <div id="st-recent" class="recent-grid"></div>
+  </div>
+</div>
+
+<div id="dlg-sub" class="dialog hidden">
+  <div class="dlg-body">
+    <b>Take another trainer's class</b>
+    <input id="in-sub" placeholder="Batch code or college, for example B07" autocomplete="off" spellcheck="false">
+    <ul id="sub-results" class="list"></ul>
+    <p class="small">The class is marked as substitute.</p>
   </div>
 </div>
 
@@ -178,9 +218,9 @@
   </div>
 </div>
 
-<script src="config.js"></script>
-<script src="jsQR.js"></script>
-<script src="sender.js"></script>
-<script src="app.js"></script>
+<script src="config.js?v=0.4.0"></script>
+<script src="jsQR.js?v=0.4.0"></script>
+<script src="sender.js?v=0.4.0"></script>
+<script src="app.js?v=0.4.0"></script>
 </body>
 </html>
